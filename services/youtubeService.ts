@@ -340,7 +340,7 @@ export const fetchShortsCount = async (
 export const fetchRecentThumbnails = async (
   uploadsPlaylistId: string,
   apiKey: string
-): Promise<{ date: string; url: string; title: string }[]> => {
+): Promise<{ date: string; url: string; title: string; viewCount?: string; videoUrl?: string }[]> => {
   let videoIds: string[] = [];
   let nextPageToken: string | undefined = undefined;
 
@@ -355,12 +355,12 @@ export const fetchRecentThumbnails = async (
 
   videoIds = playlistData.items.map((item: any) => item.contentDetails.videoId).filter(Boolean);
 
-  const recentThumbnails: { date: string; url: string; title: string }[] = [];
+  const recentThumbnails: { date: string; url: string; title: string; viewCount?: string; videoUrl?: string }[] = [];
 
-  // 2. Fetch video details in batches of 50 to get publish dates, thumbnails, and titles
+  // 2. Fetch video details in batches of 50 to get publish dates, thumbnails, titles, and view counts
   for (let i = 0; i < videoIds.length; i += 50) {
     const batch = videoIds.slice(i, i + 50);
-    const videosUrl = `${API_BASE_URL}/videos?part=snippet&id=${batch.join(',')}&key=${apiKey}`;
+    const videosUrl = `${API_BASE_URL}/videos?part=snippet,statistics&id=${batch.join(',')}&key=${apiKey}`;
     const videosResponse = await fetch(videosUrl);
     if (!videosResponse.ok) {
         const errorData = await videosResponse.json();
@@ -369,13 +369,16 @@ export const fetchRecentThumbnails = async (
     }
     const videosData = await videosResponse.json();
 
-    // 3. Collect thumbnails with dates and titles for all videos (최근 7개)
+    // 3. Collect thumbnails with dates, titles, view counts, and video URLs for all videos (최근 7개)
     for (const video of videosData.items) {
       if (video.snippet && video.snippet.publishedAt) {
         const publishDate = new Date(video.snippet.publishedAt);
         // Get the highest quality thumbnail available
         const thumbnails = video.snippet.thumbnails;
         const title = video.snippet.title || 'Untitled';
+        const viewCount = video.statistics?.viewCount || '0';
+        const videoId = video.id;
+        const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
         if (thumbnails) {
           const thumbnailUrl = thumbnails.maxres?.url ||
@@ -386,7 +389,13 @@ export const fetchRecentThumbnails = async (
           if (thumbnailUrl) {
             // Format date as YYYY-MM-DD
             const dateStr = publishDate.toISOString().split('T')[0];
-            recentThumbnails.push({ date: dateStr, url: thumbnailUrl, title });
+            recentThumbnails.push({
+              date: dateStr,
+              url: thumbnailUrl,
+              title,
+              viewCount: parseInt(viewCount).toLocaleString(),
+              videoUrl
+            });
           }
         }
       }

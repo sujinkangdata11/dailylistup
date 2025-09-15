@@ -45,6 +45,8 @@ export interface ThumbnailHistoryEntry {
   date: string; // "2024-09-15" 형태 (업로드 날짜)
   url: string; // 썸네일 이미지 URL
   title: string; // 영상 제목
+  viewCount?: string; // 영상 조회수
+  videoUrl?: string; // 영상 접속 URL
 }
 
 export interface DailyViewsHistoryEntry {
@@ -140,8 +142,10 @@ interface ImportMetaEnv {
   readonly VITE_GOOGLE_DRIVE_API_KEY: string;
 }
 
-interface ImportMeta {
-  readonly env: ImportMetaEnv;
+declare global {
+  interface ImportMeta {
+    readonly env: ImportMetaEnv;
+  }
 }
 
 // FIX: Added global declarations for 'gapi' and 'google' to a central file to avoid "Cannot redeclare block-scoped variable" errors.

@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 
-import { ChannelData, DriveFile, LogEntry, LogStatus, Snapshot, ThumbnailHistoryEntry, DailyViewsHistoryEntry, WeeklyViewsHistoryEntry } from './types';
+import { ChannelData, DriveFile, LogEntry, LogStatus, Snapshot, ThumbnailHistoryEntry, DailyViewsHistoryEntry, WeeklyViewsHistoryEntry, SubscriberHistoryEntry } from './types';
 import { fetchSelectedChannelData, findChannelsImproved, fetchShortsCount, fetchChannelIdByHandle, fetchRecentThumbnails } from './services/youtubeService';
 import { findFileByName, getFileContent, createJsonFile, updateJsonFile, listFolders, updateOrCreateChannelFile, getOrCreateChannelIndex, getExistingChannelIds } from './services/driveService';
 import { Step } from './components/Step';
@@ -1273,7 +1273,7 @@ const App: React.FC = () => {
             // Google Drive 사용 시 API 초기화
             if (driveFolderId && googleAuth) {
                 addLog(LogStatus.PENDING, 'Google Drive API 초기화 중...');
-                await initializeGoogleClient();
+                await initializeGapiClient();
                 addLog(LogStatus.SUCCESS, 'Google Drive API 초기화 완료');
             }
 
