@@ -337,6 +337,67 @@ export const fetchShortsCount = async (
   return { shortsCount, totalShortsViews };
 };
 
+export const fetchRecentThumbnails = async (
+  uploadsPlaylistId: string,
+  apiKey: string
+): Promise<{ date: string; url: string; title: string }[]> => {
+  let videoIds: string[] = [];
+  let nextPageToken: string | undefined = undefined;
+
+  // 1. Get the most recent 7 videos from the playlist (날짜 상관없이 최근 7개)
+  const playlistUrl = `${API_BASE_URL}/playlistItems?part=contentDetails&playlistId=${uploadsPlaylistId}&maxResults=7&key=${apiKey}`;
+  const playlistResponse = await fetch(playlistUrl);
+  if (!playlistResponse.ok) {
+      const errorData = await playlistResponse.json();
+      throw new Error(`YouTube PlaylistItems API error: ${errorData.error.message || playlistResponse.statusText}`);
+  }
+  const playlistData = await playlistResponse.json();
+
+  videoIds = playlistData.items.map((item: any) => item.contentDetails.videoId).filter(Boolean);
+
+  const recentThumbnails: { date: string; url: string; title: string }[] = [];
+
+  // 2. Fetch video details in batches of 50 to get publish dates, thumbnails, and titles
+  for (let i = 0; i < videoIds.length; i += 50) {
+    const batch = videoIds.slice(i, i + 50);
+    const videosUrl = `${API_BASE_URL}/videos?part=snippet&id=${batch.join(',')}&key=${apiKey}`;
+    const videosResponse = await fetch(videosUrl);
+    if (!videosResponse.ok) {
+        const errorData = await videosResponse.json();
+        console.warn(`Could not fetch details for batch, skipping. Error: ${errorData.error.message}`);
+        continue;
+    }
+    const videosData = await videosResponse.json();
+
+    // 3. Collect thumbnails with dates and titles for all videos (최근 7개)
+    for (const video of videosData.items) {
+      if (video.snippet && video.snippet.publishedAt) {
+        const publishDate = new Date(video.snippet.publishedAt);
+        // Get the highest quality thumbnail available
+        const thumbnails = video.snippet.thumbnails;
+        const title = video.snippet.title || 'Untitled';
+
+        if (thumbnails) {
+          const thumbnailUrl = thumbnails.maxres?.url ||
+                              thumbnails.standard?.url ||
+                              thumbnails.high?.url ||
+                              thumbnails.medium?.url ||
+                              thumbnails.default?.url;
+          if (thumbnailUrl) {
+            // Format date as YYYY-MM-DD
+            const dateStr = publishDate.toISOString().split('T')[0];
+            recentThumbnails.push({ date: dateStr, url: thumbnailUrl, title });
+          }
+        }
+      }
+    }
+  }
+
+  // Sort by date (newest first) and limit to 7 entries
+  recentThumbnails.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  return recentThumbnails.slice(0, 7);
+};
+
 export const fetchChannelIdByHandle = async (handle: string, apiKey:string): Promise<string> => {
     const handleName = handle.startsWith('@') ? handle.substring(1) : handle;
     const searchUrl = `${API_BASE_URL}/search?part=snippet&q=${handleName}&type=channel&maxResults=1&key=${apiKey}`;

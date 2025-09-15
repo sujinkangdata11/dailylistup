@@ -41,6 +41,25 @@ export interface SubscriberHistoryEntry {
   count: string; // 구독자 수
 }
 
+export interface ThumbnailHistoryEntry {
+  date: string; // "2024-09-15" 형태 (업로드 날짜)
+  url: string; // 썸네일 이미지 URL
+  title: string; // 영상 제목
+}
+
+export interface DailyViewsHistoryEntry {
+  date: string; // "2024-09-15" 형태
+  totalViews: string; // 해당 날짜의 총조회수
+  dailyIncrease: string; // 전날 대비 조회수 증가량
+}
+
+export interface WeeklyViewsHistoryEntry {
+  startDate: string; // "2024-09-08" 형태 (주간 시작일)
+  endDate: string; // "2024-09-15" 형태 (주간 종료일)
+  totalViews: string; // 종료일 기준 총조회수
+  weeklyIncrease: string; // 7일간 조회수 증가량
+}
+
 export interface ChannelData {
   channelId: string;
   // Static Data (절대 안바뀌는 것만)
@@ -51,6 +70,12 @@ export interface ChannelData {
   snapshots: Snapshot[];
   // Subscriber History (월별 5개 유지)
   subscriberHistory?: SubscriberHistoryEntry[];
+  // Recent Thumbnails History (최근 7일치만 유지)
+  recentThumbnailsHistory?: ThumbnailHistoryEntry[];
+  // Daily Views History (최근 7일치만 유지)
+  dailyViewsHistory?: DailyViewsHistoryEntry[];
+  // Weekly Views History (최근 4주치만 유지)
+  weeklyViewsHistory?: WeeklyViewsHistoryEntry[];
   // Metadata (간소화된 구조)
   metadata?: {
     firstCollected: string;

@@ -45,16 +45,16 @@ const updateSubscriberHistory = (existingHistory: any[] = [], newSubscriberCount
 
 export const findFileByName = async (fileName: string, folderId: string): Promise<DriveFile | null> => {
     try {
-        if (localFileStorage.has(fileName)) {
-            return {
-                id: fileName,
-                name: fileName,
-                kind: 'drive#file',
-                mimeType: 'application/json'
-            };
-        }
-        
-        return null;
+        const query = `name='${fileName}' and '${folderId}' in parents and trashed=false`;
+        const response = await gapi.client.drive.files.list({
+            q: query,
+            spaces: 'drive',
+            fields: 'files(id, name, mimeType)',
+            pageSize: 1
+        });
+
+        const files = response.result.files || [];
+        return files.length > 0 ? files[0] : null;
     } catch (error: any) {
         console.error('Error finding file:', error);
         throw new Error(`Failed to search for file: ${error.message}`);
@@ -63,63 +63,88 @@ export const findFileByName = async (fileName: string, folderId: string): Promis
 
 export const getFileContent = async (fileId: string): Promise<string> => {
     try {
-        const content = localFileStorage.get(fileId);
-        if (content) {
-            return JSON.stringify(content, null, 2);
-        }
-        throw new Error(`File not found: ${fileId}`);
+        const response = await gapi.client.drive.files.get({
+            fileId: fileId,
+            alt: 'media'
+        });
+
+        return response.body;
     } catch (error: any) {
+        console.error('Error getting file content:', error);
         throw new Error(`Failed to get file content: ${error.message}`);
     }
 }
 
 export const createJsonFile = async (fileName: string, folderId: string, content: object): Promise<DriveFile> => {
-    console.log(`🚀 [createJsonFile] 시작: ${fileName} (브라우저 다운로드)`);
-    
+    console.log(`🚀 [createJsonFile] 시작: ${fileName} (Google Drive 업로드)`);
+
     try {
-        // 메모리에 저장
-        localFileStorage.set(fileName, content);
-        
-        // 채널 인덱스 파일은 다운로드하지 않음
-        if (!fileName.includes('_channel_index.json')) {
-            // 브라우저에서 자동 다운로드 (채널 데이터만)
-            downloadJsonFile(fileName, content);
-            console.log(`✅ [createJsonFile] 성공: ${fileName} (다운로드됨)`);
-        } else {
-            console.log(`✅ [createJsonFile] 성공: ${fileName} (인덱스 파일이므로 메모리에만 저장)`);
-        }
-        
-        return {
-            id: fileName,
+        const boundary = '-------314159265358979323846';
+        const delimiter = "\r\n--" + boundary + "\r\n";
+        const close_delim = "\r\n--" + boundary + "--";
+
+        const metadata = {
             name: fileName,
-            kind: 'drive#file',
+            parents: [folderId],
             mimeType: 'application/json'
         };
+
+        const multipartRequestBody =
+            delimiter +
+            'Content-Type: application/json\r\n\r\n' +
+            JSON.stringify(metadata) +
+            delimiter +
+            'Content-Type: application/json\r\n\r\n' +
+            JSON.stringify(content, null, 2) +
+            close_delim;
+
+        const request = gapi.client.request({
+            path: 'https://www.googleapis.com/upload/drive/v3/files',
+            method: 'POST',
+            params: { uploadType: 'multipart' },
+            headers: {
+                'Content-Type': 'multipart/related; boundary="' + boundary + '"'
+            },
+            body: multipartRequestBody
+        });
+
+        const response = await request;
+        console.log(`✅ [createJsonFile] 성공: ${fileName} (Google Drive 업로드됨)`);
+
+        return response.result;
     } catch (error: any) {
         console.error(`❌ [createJsonFile] 처리 실패: ${fileName}`, error);
-        throw new Error(`Failed to process file: ${error.message}`);
+        throw new Error(`Failed to create file in Google Drive: ${error.message}`);
     }
 }
 
 export const updateJsonFile = async (fileId: string, content: object): Promise<DriveFile> => {
     try {
-        // 메모리에 업데이트
-        localFileStorage.set(fileId, content);
-        
-        // 채널 인덱스 파일은 다운로드하지 않음
-        if (!fileId.includes('_channel_index.json')) {
-            // 브라우저에서 자동 다운로드 (채널 데이터만)
-            downloadJsonFile(fileId, content);
-        }
-        
-        return {
-            id: fileId,
-            name: fileId,
-            kind: 'drive#file',
-            mimeType: 'application/json'
-        };
+        const boundary = '-------314159265358979323846';
+        const delimiter = "\r\n--" + boundary + "\r\n";
+        const close_delim = "\r\n--" + boundary + "--";
+
+        const multipartRequestBody =
+            delimiter +
+            'Content-Type: application/json\r\n\r\n' +
+            JSON.stringify(content, null, 2) +
+            close_delim;
+
+        const request = gapi.client.request({
+            path: `https://www.googleapis.com/upload/drive/v3/files/${fileId}`,
+            method: 'PATCH',
+            params: { uploadType: 'media' },
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(content, null, 2)
+        });
+
+        const response = await request;
+        return response.result;
     } catch (error: any) {
-        throw new Error(`Failed to update and download file: ${error.message}`);
+        console.error('Error updating file:', error);
+        throw new Error(`Failed to update file in Google Drive: ${error.message}`);
     }
 }
 
@@ -140,7 +165,19 @@ export const updateOrCreateChannelFile = async (
         const now = new Date().toISOString();
 
         // 새로운 스냅샷 생성 (staticData + snapshotData 합침, subscriberCount 제외)
-        const { subscriberCount, ...snapshotWithoutSubscriber } = channelData.snapshot;
+        // channelData.snapshot이 없으면 channelData.snapshots[0]을 사용 (두 번째 처리 위치 대응)
+        const snapshotData = channelData.snapshot || (channelData.snapshots && channelData.snapshots[0]);
+        console.log(`🔍 [DEBUG] 스냅샷 데이터 확인:`, {
+            hasSnapshot: !!channelData.snapshot,
+            hasSnapshots: !!channelData.snapshots,
+            snapshotData: !!snapshotData
+        });
+
+        if (!snapshotData) {
+            throw new Error('스냅샷 데이터가 없습니다. channelData.snapshot 또는 channelData.snapshots[0]이 필요합니다.');
+        }
+
+        const { subscriberCount, ...snapshotWithoutSubscriber } = snapshotData;
         const { publishedAt, ...staticDataForSnapshot } = channelData.staticData || {};
         
         const newSnapshot = {
@@ -181,6 +218,10 @@ export const updateOrCreateChannelFile = async (
                 channelId: channelData.channelId,
                 staticData: updatedStaticData,
                 snapshots: updatedSnapshots,
+                // 히스토리 데이터 포함 (있는 경우에만)
+                ...(channelData.recentThumbnailsHistory && { recentThumbnailsHistory: channelData.recentThumbnailsHistory }),
+                ...(channelData.dailyViewsHistory && { dailyViewsHistory: channelData.dailyViewsHistory }),
+                ...(channelData.weeklyViewsHistory && { weeklyViewsHistory: channelData.weeklyViewsHistory }),
                 subscriberHistory: updatedSubscriberHistory,
                 metadata: updatedMetadata
             };
@@ -195,6 +236,10 @@ export const updateOrCreateChannelFile = async (
                     publishedAt: channelData.staticData?.publishedAt
                 },
                 snapshots: [newSnapshot],
+                // 히스토리 데이터 포함 (있는 경우에만)
+                ...(channelData.recentThumbnailsHistory && { recentThumbnailsHistory: channelData.recentThumbnailsHistory }),
+                ...(channelData.dailyViewsHistory && { dailyViewsHistory: channelData.dailyViewsHistory }),
+                ...(channelData.weeklyViewsHistory && { weeklyViewsHistory: channelData.weeklyViewsHistory }),
                 subscriberHistory: updateSubscriberHistory([], subscriberCount),
                 metadata: {
                     firstCollected: now,
@@ -219,8 +264,8 @@ export const updateOrCreateChannelFile = async (
         };
 
         try {
-            // 채널 인덱스를 로컬 json 폴더에 저장
-            await updateChannelIndex('local', channelInfo);
+            // 채널 인덱스를 선택한 Google Drive 폴더에 저장
+            await updateChannelIndex(folderId, channelInfo);
         } catch (indexError) {
             console.warn(`채널 인덱스 업데이트 실패 (채널 저장은 성공): ${indexError}`);
             // 인덱스 업데이트 실패해도 채널 저장은 성공한 것으로 처리
@@ -313,12 +358,21 @@ export const getExistingChannelIds = async (folderId: string): Promise<string[]>
 };
 
 export const listFolders = async (): Promise<DriveFile[]> => {
-    // 로컬 저장으로 변경되어 폴더 목록이 필요없음
-    // 기본 로컬 폴더 반환
-    return [{
-        id: 'local',
-        name: 'Local JSON Storage',
-        kind: 'drive#file',
-        mimeType: 'application/vnd.google-apps.folder'
-    }];
+    try {
+        console.log('🔍 Fetching folders from Google Drive...');
+        const response = await gapi.client.drive.files.list({
+            q: "mimeType='application/vnd.google-apps.folder' and trashed=false",
+            spaces: 'drive',
+            fields: 'files(id, name, mimeType)',
+            pageSize: 100
+        });
+
+        console.log('📁 Drive API response:', response);
+        console.log('📁 Found folders:', response.result.files);
+
+        return response.result.files || [];
+    } catch (error) {
+        console.error('❌ Error fetching folders:', error);
+        throw error;
+    }
 }

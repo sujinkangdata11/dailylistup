@@ -1,8 +1,8 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 
-import { ChannelData, DriveFile, LogEntry, LogStatus, Snapshot } from './types';
-import { fetchSelectedChannelData, findChannelsImproved, fetchShortsCount, fetchChannelIdByHandle } from './services/youtubeService';
+import { ChannelData, DriveFile, LogEntry, LogStatus, Snapshot, ThumbnailHistoryEntry, DailyViewsHistoryEntry, WeeklyViewsHistoryEntry } from './types';
+import { fetchSelectedChannelData, findChannelsImproved, fetchShortsCount, fetchChannelIdByHandle, fetchRecentThumbnails } from './services/youtubeService';
 import { findFileByName, getFileContent, createJsonFile, updateJsonFile, listFolders, updateOrCreateChannelFile, getOrCreateChannelIndex, getExistingChannelIds } from './services/driveService';
 import { Step } from './components/Step';
 import { LogItem } from './components/LogItem';
@@ -11,7 +11,7 @@ import { LogItem } from './components/LogItem';
 type ApiDataField = {
   id: string;
   label: string;
-  example: string | boolean | string[];
+  example: string | boolean | string[] | { date: string; url: string; title: string }[] | { date: string; totalViews: string; dailyIncrease: string }[] | { startDate: string; endDate: string; totalViews: string; weeklyIncrease: string }[];
 };
 
 // Google OAuth 설정은 UI에서 직접 입력받습니다.
@@ -107,6 +107,9 @@ const apiDataFields: { group: string; fields: ApiDataField[] }[] = [
     group: '콘텐츠 상세 (Content Details)',
     fields: [
       { id: 'uploadsPlaylistId', label: '업로드 재생목록 ID', example: 'UUX6OQ3DkcsbYNE6H8uQQuVA' },
+      { id: 'recentThumbnails', label: '최근 7일 썸네일 이미지', example: [{ date: '2024-09-15', url: 'https://i.ytimg.com/vi/...', title: '영상 제목' }] },
+      { id: 'dailyViews', label: '최근 7일 일일 조회수', example: [{ date: '2024-09-15', totalViews: '1000000', dailyIncrease: '5000' }] },
+      { id: 'weeklyViews', label: '최근 4주 주간 조회수', example: [{ startDate: '2024-09-08', endDate: '2024-09-15', totalViews: '1000000', weeklyIncrease: '35000' }] },
     ]
   },
   {
@@ -302,6 +305,7 @@ const App: React.FC = () => {
     const [danbiStartIndex, setDanbiStartIndex] = useState(0);
 
     const [step4Complete, setStep4Complete] = useState(false);
+    const [isManualProcessing, setIsManualProcessing] = useState(false);
     
     // 진행상황 추적 상태
     const [processingProgress, setProcessingProgress] = useState({
@@ -311,7 +315,7 @@ const App: React.FC = () => {
         currentStep: '',
         isActive: false
     });
-    // 디폴트로 "옵션값 1" 11개 필드 모두 선택 (채널제목, 개설일, 국가, 지정URL, 채널URL, 프로필아이콘88×88, 구독자수, 총영상수, 총조회수, 토픽카테고리, 업로드플레이리스트ID)
+    // 디폴트로 "옵션값 1" 14개 필드 모두 선택 (기본 11개 + 썸네일/일일/주간 조회수 3개)
     const [selectedFields, setSelectedFields] = useState<Set<string>>(new Set([
         'title',              // 채널제목
         'publishedAt',        // 개설일
@@ -323,7 +327,10 @@ const App: React.FC = () => {
         'videoCount',        // 총영상수
         'viewCount',         // 총조회수
         'topicCategories',   // 토픽카테고리
-        'uploadsPlaylistId'  // 업로드플레이리스트ID
+        'uploadsPlaylistId', // 업로드플레이리스트ID
+        'recentThumbnails',  // 최근 7일 썸네일 이미지
+        'dailyViews',        // 최근 7일 일일 조회수
+        'weeklyViews'        // 최근 4주 주간 조회수
     ]));
     // 디폴트로 응용데이터 17개 모두 선택
     const [appliedFields, setAppliedFields] = useState<Set<string>>(new Set([
@@ -369,6 +376,208 @@ const App: React.FC = () => {
         const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         setLogs(prev => [{ id: uniqueId, status, message, timestamp }, ...prev]);
     }, []);
+
+    // Calculate daily views history from existing channel data
+    const calculateDailyViewsHistory = useCallback(async (channelId: string, currentViewCount: string): Promise<DailyViewsHistoryEntry[]> => {
+        try {
+            const fileName = `${channelId}.json`;
+            const existingFile = await findFileByName(fileName, driveFolderId || 'root');
+
+            if (!existingFile) {
+                // No existing data, return current day only
+                const today = new Date().toISOString().split('T')[0];
+                return [{
+                    date: today,
+                    totalViews: currentViewCount,
+                    dailyIncrease: '0' // First day, no increase data
+                }];
+            }
+
+            const content = await getFileContent(existingFile.id);
+            const existingData: ChannelData = JSON.parse(content);
+
+            // Get existing daily views history or create from snapshots
+            let dailyViewsHistory: DailyViewsHistoryEntry[] = existingData.dailyViewsHistory || [];
+
+            // If no daily views history exists, try to create from snapshots
+            if (dailyViewsHistory.length === 0 && existingData.snapshots && existingData.snapshots.length > 0) {
+                const snapshots = existingData.snapshots.sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
+
+                for (let i = 0; i < snapshots.length; i++) {
+                    const snapshot = snapshots[i];
+                    const date = new Date(snapshot.ts).toISOString().split('T')[0];
+                    const totalViews = snapshot.viewCount || '0';
+                    const previousViews = i > 0 ? snapshots[i-1].viewCount || '0' : '0';
+                    const dailyIncrease = i > 0 ? (parseInt(totalViews) - parseInt(previousViews)).toString() : '0';
+
+                    dailyViewsHistory.push({
+                        date,
+                        totalViews,
+                        dailyIncrease
+                    });
+                }
+            }
+
+            // Add today's data
+            const today = new Date().toISOString().split('T')[0];
+            const lastEntry = dailyViewsHistory[dailyViewsHistory.length - 1];
+            const previousViews = lastEntry ? lastEntry.totalViews : '0';
+            const dailyIncrease = (parseInt(currentViewCount) - parseInt(previousViews)).toString();
+
+            // Remove today's entry if it already exists
+            dailyViewsHistory = dailyViewsHistory.filter(entry => entry.date !== today);
+
+            // Add new entry for today
+            dailyViewsHistory.push({
+                date: today,
+                totalViews: currentViewCount,
+                dailyIncrease
+            });
+
+            // Keep only last 7 days
+            dailyViewsHistory.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+            return dailyViewsHistory.slice(0, 7);
+
+        } catch (error) {
+            console.error('Error calculating daily views history:', error);
+            const today = new Date().toISOString().split('T')[0];
+            return [{
+                date: today,
+                totalViews: currentViewCount,
+                dailyIncrease: '0'
+            }];
+        }
+    }, [driveFolderId]);
+
+    // Calculate weekly views history from existing channel data (only when 7 days passed)
+    const calculateWeeklyViewsHistory = useCallback(async (channelId: string, currentViewCount: string): Promise<WeeklyViewsHistoryEntry[]> => {
+        try {
+            const fileName = `${channelId}.json`;
+            const existingFile = await findFileByName(fileName, driveFolderId || 'root');
+
+            if (!existingFile) {
+                // No existing data, create first weekly entry
+                const today = new Date();
+                const sevenDaysAgo = new Date(today);
+                sevenDaysAgo.setDate(today.getDate() - 7);
+
+                return [{
+                    startDate: sevenDaysAgo.toISOString().split('T')[0],
+                    endDate: today.toISOString().split('T')[0],
+                    totalViews: currentViewCount,
+                    weeklyIncrease: '0' // First week, no previous data
+                }];
+            }
+
+            const content = await getFileContent(existingFile.id);
+            const existingData: ChannelData = JSON.parse(content);
+
+            // Get existing weekly views history
+            let weeklyViewsHistory: WeeklyViewsHistoryEntry[] = existingData.weeklyViewsHistory || [];
+
+            // Check if 7 days have passed since last weekly entry
+            const today = new Date();
+            const todayStr = today.toISOString().split('T')[0];
+
+            if (weeklyViewsHistory.length === 0) {
+                // First weekly entry
+                const sevenDaysAgo = new Date(today);
+                sevenDaysAgo.setDate(today.getDate() - 7);
+
+                return [{
+                    startDate: sevenDaysAgo.toISOString().split('T')[0],
+                    endDate: todayStr,
+                    totalViews: currentViewCount,
+                    weeklyIncrease: '0'
+                }];
+            }
+
+            const lastEntry = weeklyViewsHistory[0]; // Most recent entry
+            const lastDate = new Date(lastEntry.endDate);
+            const daysDiff = Math.floor((today.getTime() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
+
+            // Only add new weekly entry if 7 or more days have passed
+            if (daysDiff >= 7) {
+                const weeklyIncrease = (parseInt(currentViewCount) - parseInt(lastEntry.totalViews)).toString();
+
+                const newWeekEntry: WeeklyViewsHistoryEntry = {
+                    startDate: lastEntry.endDate,
+                    endDate: todayStr,
+                    totalViews: currentViewCount,
+                    weeklyIncrease
+                };
+
+                // Add new entry and keep only the most recent 4 weeks
+                weeklyViewsHistory = [newWeekEntry, ...weeklyViewsHistory.slice(0, 3)];
+            }
+
+            return weeklyViewsHistory;
+
+        } catch (error) {
+            console.error('Error calculating weekly views history:', error);
+            const today = new Date();
+            const sevenDaysAgo = new Date(today);
+            sevenDaysAgo.setDate(today.getDate() - 7);
+
+            return [{
+                startDate: sevenDaysAgo.toISOString().split('T')[0],
+                endDate: today.toISOString().split('T')[0],
+                totalViews: currentViewCount,
+                weeklyIncrease: '0'
+            }];
+        }
+    }, [driveFolderId]);
+
+    // Calculate subscriber history from existing channel data (monthly, max 5 entries)
+    const calculateSubscriberHistory = useCallback(async (channelId: string, currentSubscriberCount: string): Promise<any[]> => {
+        try {
+            const fileName = `${channelId}.json`;
+            const existingFile = await findFileByName(fileName, driveFolderId || 'root');
+
+            const currentMonth = new Date().toISOString().slice(0, 7); // "2025-09" format
+
+            if (!existingFile) {
+                // No existing data, create first entry
+                return [{
+                    month: currentMonth,
+                    count: currentSubscriberCount
+                }];
+            }
+
+            const content = await getFileContent(existingFile.id);
+            const existingData: ChannelData = JSON.parse(content);
+
+            // Get existing subscriber history
+            let subscriberHistory = existingData.subscriberHistory || [];
+
+            // Check if current month already exists
+            const existingEntry = subscriberHistory.find(entry => entry.month === currentMonth);
+
+            if (existingEntry) {
+                // Update existing entry for current month
+                existingEntry.count = currentSubscriberCount;
+            } else {
+                // Add new entry for current month
+                subscriberHistory.unshift({
+                    month: currentMonth,
+                    count: currentSubscriberCount
+                });
+
+                // Keep only the most recent 5 months
+                subscriberHistory = subscriberHistory.slice(0, 5);
+            }
+
+            return subscriberHistory;
+
+        } catch (error) {
+            console.error('Error calculating subscriber history:', error);
+            const currentMonth = new Date().toISOString().slice(0, 7);
+            return [{
+                month: currentMonth,
+                count: currentSubscriberCount
+            }];
+        }
+    }, [driveFolderId]);
 
     useEffect(() => {
         // 새로운 Google Identity Services 스크립트 로드
@@ -579,9 +788,49 @@ const App: React.FC = () => {
         }
     }, [addLog]);
 
+    const handleSignInClick = useCallback(async () => {
+        try {
+            if (!gapiScriptLoaded) {
+                addLog(LogStatus.ERROR, "Google API가 아직 로드되지 않았습니다. 잠시 후 다시 시도해주세요.");
+                return;
+            }
+
+            // Google Identity Services를 사용한 OAuth 2.0 로그인
+            const client = google.accounts.oauth2.initTokenClient({
+                client_id: import.meta.env.VITE_GOOGLE_CLIENT_ID,
+                scope: 'https://www.googleapis.com/auth/drive',
+                callback: async (response: any) => {
+                    if (response.access_token) {
+                        // 토큰을 받았으면 gapi 클라이언트 초기화
+                        await initializeGapiClient(response.access_token);
+
+                        // 사용자 정보 가져오기 (간단하게 토큰으로 설정)
+                        setGoogleAuth(response);
+                        setUser({
+                            name: "Google 사용자",
+                            email: "google.user@gmail.com",
+                            picture: "https://via.placeholder.com/40"
+                        });
+                        addLog(LogStatus.SUCCESS, "Google 계정으로 로그인되었습니다.");
+                    }
+                }
+            });
+
+            client.requestAccessToken();
+        } catch (error: any) {
+            addLog(LogStatus.ERROR, `로그인 실패: ${error.message}`);
+        }
+    }, [gapiScriptLoaded, addLog, initializeGapiClient]);
+
     const handleSignOutClick = () => {
         if (googleAuth) {
-            googleAuth.signOut();
+            // Google 로그아웃
+            google.accounts.oauth2.revoke(googleAuth.access_token);
+            setGoogleAuth(null);
+            setUser(null);
+            setSelectedFolder(null);
+            setFolders([]);
+            addLog(LogStatus.INFO, 'Google 계정에서 로그아웃되었습니다. 다시 로그인하면 전체 Drive 권한으로 접근합니다.');
         }
     };
 
@@ -890,7 +1139,8 @@ const App: React.FC = () => {
     const processDanbiChannelsSequentially = async (startIndex: number) => {
         const preset1Fields = new Set([
             'title', 'publishedAt', 'country', 'customUrl', 'channelUrl', 'thumbnailDefault',
-            'subscriberCount', 'videoCount', 'viewCount', 'topicCategories', 'uploadsPlaylistId'
+            'subscriberCount', 'videoCount', 'viewCount', 'topicCategories', 'uploadsPlaylistId',
+            'recentThumbnails', 'dailyViews', 'weeklyViews'
         ]);
 
         for (let i = startIndex; i < danbiCsvData.length; i++) {
@@ -1020,7 +1270,15 @@ const App: React.FC = () => {
         }
 
         try {
+            // Google Drive 사용 시 API 초기화
+            if (driveFolderId && googleAuth) {
+                addLog(LogStatus.PENDING, 'Google Drive API 초기화 중...');
+                await initializeGoogleClient();
+                addLog(LogStatus.SUCCESS, 'Google Drive API 초기화 완료');
+            }
+
             setStep4Complete(true);
+            setIsManualProcessing(true); // 수동 처리 시작 플래그
             setIsProcessingStarted(true);
             addLog(LogStatus.SUCCESS, `4단계 완료: 필드 선택이 확정되었으며, 5단계 데이터 처리를 시작합니다.`);
 
@@ -1129,17 +1387,27 @@ const App: React.FC = () => {
                 try {
                     // 모든 필드 (기본 + 응용) 포함
                     const allFields = new Set([...selectedFields, ...appliedFields]);
-                    
+
+                    // 강제로 히스토리 데이터 필드들 추가 (수동 입력, 단비 처리에서도 모든 히스토리 데이터 포함)
+                    allFields.add('recentThumbnails');
+                    allFields.add('dailyViews');
+                    allFields.add('weeklyViews');
+                    allFields.add('subscriberCount'); // 구독자 히스토리를 위해 필요
+
                     // 의존성 필드 추가 (응용데이터 계산을 위해 필요한 필드들)
                     if (appliedFields.has('longformCount')) {
                         allFields.add('videoCount');
                     }
-                    if (allFields.has('shortsCount') || allFields.has('longformCount') || allFields.has('totalShortsDuration') || allFields.has('estimatedShortsViews') || allFields.has('estimatedLongformViews')) {
+                    if (allFields.has('shortsCount') || allFields.has('longformCount') || allFields.has('totalShortsDuration') || allFields.has('estimatedShortsViews') || allFields.has('estimatedLongformViews') || allFields.has('recentThumbnails')) {
                         allFields.add('uploadsPlaylistId');
                     }
                     if (Array.from(appliedFields).some((f: string) => f.includes('Gained') || f.includes('uploadsPer') || f.includes('Age'))) {
                         allFields.add('publishedAt');
                     }
+
+                    // 히스토리 데이터를 위한 의존성 필드들 자동 추가
+                    allFields.add('uploadsPlaylistId'); // 썸네일 히스토리를 위해 필요
+                    allFields.add('viewCount'); // 일일/주간 조회수 히스토리를 위해 필요
                     
                     console.log(`[DEBUG] 처리 시작 - 채널 ${channelId}:`, {
                         selectedFields: Array.from(selectedFields),
@@ -1187,6 +1455,111 @@ const App: React.FC = () => {
                         }
                     }
 
+                    // 3. Fetch recent thumbnails if needed
+                    let recentThumbnailsHistory: ThumbnailHistoryEntry[] | undefined;
+                    console.log(`[DEBUG] 썸네일 수집 체크:`, {
+                        hasRecentThumbnails: allFields.has('recentThumbnails'),
+                        uploadsPlaylistId: uploadsPlaylistId,
+                        allFields: Array.from(allFields)
+                    });
+                    if (allFields.has('recentThumbnails') && uploadsPlaylistId) {
+                        setProcessingProgress(prev => ({
+                            ...prev,
+                            currentStep: '최근 7일 썸네일 수집 중...'
+                        }));
+                        addLog(LogStatus.PENDING, `최근 7일 썸네일 수집 중 - ${staticData.title || channelId}... 최신 영상들의 썸네일을 가져오는 중입니다.`);
+                        try {
+                            const recentThumbnails = await fetchRecentThumbnails(uploadsPlaylistId, youtubeApiKey);
+                            recentThumbnailsHistory = recentThumbnails;
+                            addLog(LogStatus.SUCCESS, `썸네일 수집 완료 - ${staticData.title || channelId}: 최근 7일간 ${recentThumbnails.length}개 썸네일 수집.`);
+                            setProcessingProgress(prev => ({
+                                ...prev,
+                                currentStep: '썸네일 수집 완료'
+                            }));
+                        } catch (e: any) {
+                            addLog(LogStatus.ERROR, `썸네일 수집 실패 - ${staticData.title || channelId}: ${e.message}`);
+                            setProcessingProgress(prev => ({
+                                ...prev,
+                                currentStep: '썸네일 수집 실패 (계속 진행)'
+                            }));
+                        }
+                    }
+
+                    // 4. Calculate daily views history if needed
+                    let dailyViewsHistory: DailyViewsHistoryEntry[] | undefined;
+                    if (allFields.has('dailyViews')) {
+                        setProcessingProgress(prev => ({
+                            ...prev,
+                            currentStep: '일일 조회수 계산 중...'
+                        }));
+                        addLog(LogStatus.PENDING, `일일 조회수 계산 중 - ${staticData.title || channelId}... 과거 데이터와 비교하여 일일 증가량을 계산합니다.`);
+                        try {
+                            const currentViewCount = snapshotData.viewCount || '0';
+                            dailyViewsHistory = await calculateDailyViewsHistory(channelId, currentViewCount);
+                            addLog(LogStatus.SUCCESS, `일일 조회수 계산 완료 - ${staticData.title || channelId}: 최근 7일간 데이터 생성.`);
+                            setProcessingProgress(prev => ({
+                                ...prev,
+                                currentStep: '일일 조회수 계산 완료'
+                            }));
+                        } catch (e: any) {
+                            addLog(LogStatus.ERROR, `일일 조회수 계산 실패 - ${staticData.title || channelId}: ${e.message}`);
+                            setProcessingProgress(prev => ({
+                                ...prev,
+                                currentStep: '일일 조회수 계산 실패 (계속 진행)'
+                            }));
+                        }
+                    }
+
+                    // 5. Calculate weekly views history if needed (only if 7 days passed)
+                    let weeklyViewsHistory: WeeklyViewsHistoryEntry[] | undefined;
+                    if (allFields.has('weeklyViews')) {
+                        setProcessingProgress(prev => ({
+                            ...prev,
+                            currentStep: '주간 조회수 계산 중...'
+                        }));
+                        addLog(LogStatus.PENDING, `주간 조회수 계산 중 - ${staticData.title || channelId}... 7일 간격 체크 후 주간 데이터를 생성합니다.`);
+                        try {
+                            const currentViewCount = snapshotData.viewCount || '0';
+                            weeklyViewsHistory = await calculateWeeklyViewsHistory(channelId, currentViewCount);
+                            addLog(LogStatus.SUCCESS, `주간 조회수 계산 완료 - ${staticData.title || channelId}: 최근 4주간 데이터 생성.`);
+                            setProcessingProgress(prev => ({
+                                ...prev,
+                                currentStep: '주간 조회수 계산 완료'
+                            }));
+                        } catch (e: any) {
+                            addLog(LogStatus.ERROR, `주간 조회수 계산 실패 - ${staticData.title || channelId}: ${e.message}`);
+                            setProcessingProgress(prev => ({
+                                ...prev,
+                                currentStep: '주간 조회수 계산 실패 (계속 진행)'
+                            }));
+                        }
+                    }
+
+                    // 6. Calculate subscriber history if needed (monthly, max 5 entries)
+                    let subscriberHistory: any[] | undefined;
+                    if (allFields.has('subscriberCount')) {
+                        setProcessingProgress(prev => ({
+                            ...prev,
+                            currentStep: '구독자 히스토리 계산 중...'
+                        }));
+                        addLog(LogStatus.PENDING, `구독자 히스토리 계산 중 - ${staticData.title || channelId}... 월별 구독자 수 변화를 기록합니다.`);
+                        try {
+                            const currentSubscriberCount = snapshotData.subscriberCount || '0';
+                            subscriberHistory = await calculateSubscriberHistory(channelId, currentSubscriberCount);
+                            addLog(LogStatus.SUCCESS, `구독자 히스토리 계산 완료 - ${staticData.title || channelId}: 최근 ${subscriberHistory.length}개월 데이터 생성.`);
+                            setProcessingProgress(prev => ({
+                                ...prev,
+                                currentStep: '구독자 히스토리 계산 완료'
+                            }));
+                        } catch (e: any) {
+                            addLog(LogStatus.ERROR, `구독자 히스토리 계산 실패 - ${staticData.title || channelId}: ${e.message}`);
+                            setProcessingProgress(prev => ({
+                                ...prev,
+                                currentStep: '구독자 히스토리 계산 실패 (계속 진행)'
+                            }));
+                        }
+                    }
+
                     // 3. 응용데이터 계산 (shortsCountData 포함)
                     let finalSnapshotData = snapshotData;
                     if (appliedFields.size > 0) {
@@ -1201,7 +1574,14 @@ const App: React.FC = () => {
                         });
                         
                         finalSnapshotData = calculateAndAddAppliedData(snapshotData, staticData.publishedAt, shortsCountData);
-                        
+
+                        // 크롤링 실패한 채널 처리
+                        if (!finalSnapshotData) {
+                            addLog(LogStatus.WARNING, `⚠️ 채널 ${staticData?.title || channelId} 크롤링 실패로 스킵합니다.`);
+                            setIsManualProcessing(false);
+                            return;
+                        }
+
                         console.log(`[DEBUG] 응용데이터 계산 완료 - 채널 ${channelId}:`, {
                             finalSnapshot: finalSnapshotData
                         });
@@ -1211,21 +1591,43 @@ const App: React.FC = () => {
                         }));
                     }
 
-                    // 17개 축약 지표 검증 (gsvr 제거)
-                    const requiredFields = ['gavg', 'gsub', 'gvps', 'gage', 'gupw', 'gspd', 'gvpd', 'gspm', 'gspy', 'gvir', 'csct', 'clct', 'csdr', 'vesv', 'vsvp', 'velv', 'vlvp'];
-                    const missingFields = requiredFields.filter(field => finalSnapshotData[field as keyof typeof finalSnapshotData] === undefined);
-                    
-                    console.log(`// 17개 매칭 -> ${missingFields.length === 0 ? '성공' : '실패'} -> ${missingFields.length === 0 ? '저장합니다' : '종료합니다'}`);
-                    
-                    if (missingFields.length > 0) {
-                        console.log(`// 누락된 필드들: ${missingFields.join(', ')}`);
-                        addLog(LogStatus.ERROR, `❌ 17개 지표 검증 실패 - 누락된 필드: ${missingFields.join(', ')}`);
-                        addLog(LogStatus.WARNING, `⚠️ 필수 지표 누락으로 인해 저장을 중단합니다.`);
-                        break;
+                    // 14개 기본 데이터 + 17개 응용 데이터 검증
+                    const staticFields = ['title', 'customUrl', 'country', 'thumbnailDefault', 'uploadsPlaylistId'];
+                    const snapshotFields = ['viewCount', 'videoCount', 'subscriberCount'];
+                    const requiredAppliedFields = ['gavg', 'gsub', 'gvps', 'gage', 'gupw', 'gspd', 'gvpd', 'gspm', 'gspy', 'gvir', 'csct', 'clct', 'csdr', 'vesv', 'vsvp', 'velv', 'vlvp'];
+
+                    const missingStaticFields = staticFields.filter(field => {
+                        if (field === 'country') {
+                            // country가 없으면 "null"로 설정하고 누락으로 처리하지 않음
+                            if (staticData[field as keyof typeof staticData] === undefined) {
+                                staticData.country = "null";
+                                return false;
+                            }
+                        }
+                        return staticData[field as keyof typeof staticData] === undefined;
+                    });
+                    const missingSnapshotFields = snapshotFields.filter(field => finalSnapshotData[field as keyof typeof finalSnapshotData] === undefined);
+                    const missingAppliedFields = requiredAppliedFields.filter(field => finalSnapshotData[field as keyof typeof finalSnapshotData] === undefined);
+
+                    const totalBasicMissing = missingStaticFields.length + missingSnapshotFields.length;
+                    const totalMissing = totalBasicMissing + missingAppliedFields.length;
+
+                    console.log(`// 31개 필드 검증 (기본 14개 + 응용 17개) -> ${totalMissing === 0 ? '성공' : '실패'} -> ${totalMissing === 0 ? '저장합니다' : '종료합니다'}`);
+
+                    if (totalMissing > 0) {
+                        console.log(`// 누락된 static 필드: ${missingStaticFields.join(', ')}`);
+                        console.log(`// 누락된 snapshot 필드: ${missingSnapshotFields.join(', ')}`);
+                        console.log(`// 누락된 응용 필드: ${missingAppliedFields.join(', ')}`);
+                        addLog(LogStatus.ERROR, `❌ 31개 필드 검증 실패 - static 누락: ${missingStaticFields.length}개, snapshot 누락: ${missingSnapshotFields.length}개, 응용 누락: ${missingAppliedFields.length}개`);
+                        addLog(LogStatus.WARNING, `⚠️ 필수 필드 누락으로 인해 저장을 중단합니다.`);
+
+                        // 플래그 리셋 후 완전히 함수 종료
+                        setIsManualProcessing(false);
+                        return;
                     }
-                    
-                    console.log('// 17개 매칭 -> 성공 -> 저장합니다 -> 다음으로');
-                    addLog(LogStatus.SUCCESS, `✓ 17개 지표 검증 완료 - ${staticData?.title || channelId}`);
+
+                    console.log('// 31개 필드 검증 완료 -> 저장합니다 -> 다음으로');
+                    addLog(LogStatus.SUCCESS, `✓ 31개 필드 검증 완료 (기본 14개 + 응용 17개) - ${staticData?.title || channelId}`);
 
                     // 데이터 일관성 보정 로직 (ε = 1%)
                     const ε = 1; // 최소 비중 1%
@@ -1257,52 +1659,51 @@ const App: React.FC = () => {
                     }
 
                     // 즉시 Drive에 저장 (메모리 절약)
+                    const now = new Date().toISOString();
+                    console.log(`[DEBUG] 최종 데이터 준비:`, {
+                        recentThumbnailsHistory: recentThumbnailsHistory?.length || 0,
+                        dailyViewsHistory: dailyViewsHistory?.length || 0,
+                        weeklyViewsHistory: weeklyViewsHistory?.length || 0,
+                        subscriberHistory: subscriberHistory?.length || 0
+                    });
                     const channelData = {
                         channelId,
                         staticData,
-                        snapshot: finalSnapshotData
-                    };
-                    
-                    if (driveFolderId) {
-                        // Google Drive 저장
-                        setProcessingProgress(prev => ({
-                            ...prev,
-                            currentStep: 'Google Drive에 저장 중...'
-                        }));
-                        
-                        addLog(LogStatus.PENDING, `채널 파일 저장 중... (${i + 1}/${processTargetChannelIds.length}): ${staticData?.title || channelId}`);
-                        
-                        try {
-                            await updateOrCreateChannelFile(channelData, driveFolderId);
-                            processedCount++;
-                            addLog(LogStatus.SUCCESS, `✓ ${staticData?.title || channelId} Google Drive 저장 완료`);
-                        } catch (driveError: any) {
-                            addLog(LogStatus.ERROR, `❌ Drive 저장 실패: ${driveError.message}`);
-                            addLog(LogStatus.WARNING, `⚠️ 첫 번째 채널 저장 실패로 인해 처리를 중단합니다. 유튜브 할당량 절약을 위함입니다.`);
-                            // 저장 실패시 즉시 루프 중단
-                            break;
+                        snapshot: finalSnapshotData,
+                        ...(recentThumbnailsHistory && { recentThumbnailsHistory }),
+                        ...(dailyViewsHistory && { dailyViewsHistory }),
+                        ...(weeklyViewsHistory && { weeklyViewsHistory }),
+                        ...(subscriberHistory && { subscriberHistory }),
+                        metadata: {
+                            firstCollected: now,
+                            lastUpdated: now,
+                            totalCollections: 1
                         }
-                    } else {
-                        // 로컬 JSON 다운로드
-                        setProcessingProgress(prev => ({
-                            ...prev,
-                            currentStep: '로컬 JSON 파일 생성 중...'
-                        }));
-                        
-                        const fileName = `${channelId}.json`;
-                        const jsonContent = JSON.stringify(channelData, null, 2);
-                        const blob = new Blob([jsonContent], { type: 'application/json' });
-                        const url = URL.createObjectURL(blob);
-                        const link = document.createElement('a');
-                        link.href = url;
-                        link.download = fileName;
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-                        URL.revokeObjectURL(url);
-                        
+                    };
+                    console.log(`[DEBUG] 최종 channelData 구조:`, Object.keys(channelData));
+                    
+                    if (!user) {
+                        addLog(LogStatus.ERROR, "Google 계정에 로그인하지 않았습니다. 먼저 로그인해주세요.");
+                        break;
+                    }
+
+                    // Google Drive 저장 (로그인한 경우 무조건 Google Drive에 저장)
+                    setProcessingProgress(prev => ({
+                        ...prev,
+                        currentStep: 'Google Drive에 저장 중...'
+                    }));
+
+                    addLog(LogStatus.PENDING, `채널 파일 저장 중... (${i + 1}/${processTargetChannelIds.length}): ${staticData?.title || channelId}`);
+
+                    try {
+                        await updateOrCreateChannelFile(channelData, selectedFolder?.id || driveFolderId || 'root');
                         processedCount++;
-                        addLog(LogStatus.SUCCESS, `✓ ${staticData?.title || channelId} 로컬 JSON 다운로드 완료`);
+                        addLog(LogStatus.SUCCESS, `✓ ${staticData?.title || channelId} Google Drive 저장 완료`);
+                    } catch (driveError: any) {
+                        addLog(LogStatus.ERROR, `❌ Drive 저장 실패: ${driveError.message}`);
+                        addLog(LogStatus.WARNING, `⚠️ 첫 번째 채널 저장 실패로 인해 처리를 중단합니다. 유튜브 할당량 절약을 위함입니다.`);
+                        // 저장 실패시 즉시 루프 중단
+                        break;
                     }
                     
                     // Danbi 모드인 경우 진행상황 업데이트
@@ -1334,9 +1735,6 @@ const App: React.FC = () => {
 
             // 스트리밍 방식으로 이미 모든 저장 완료됨
 
-            // collections 폴더 찾기 (생성하지 않음)
-            let collectionsFolder = await findFileByName('collections', driveFolderId);
-
             const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
             const metadataFileName = `${timestamp}.json`;
             const metadataContent = {
@@ -1346,14 +1744,13 @@ const App: React.FC = () => {
                 processedChannels: processTargetChannelIds.slice(0, processedCount)
             };
 
-            if (collectionsFolder) {
-                await createJsonFile(metadataFileName, collectionsFolder.id, metadataContent);
-                addLog(LogStatus.SUCCESS, `📋 수집 기록 파일 생성: collections/${metadataFileName}`);
-            } else {
-                addLog(LogStatus.INFO, '📋 collections 폴더가 없어서 수집 기록을 건너뜁니다.');
-            }
+            // 수집 기록은 더 이상 생성하지 않음
+            addLog(LogStatus.INFO, '📋 수집 기록 파일 생성을 건너뜁니다.');
             addLog(LogStatus.SUCCESS, `🎉 처리 완료: 총 ${processedCount}개 채널을 ${updateMode === 'existing' ? '업데이트' : '신규 수집'}했습니다.`);
-            
+
+            // 수동 처리 완료 플래그 리셋
+            setIsManualProcessing(false);
+
             // 진행상황 완료 처리
             setProcessingProgress(prev => ({
                 ...prev,
@@ -1363,6 +1760,9 @@ const App: React.FC = () => {
 
         } catch (error: any) {
             console.error('데이터 처리 오류:', error);
+
+            // 에러 발생 시에도 플래그 리셋
+            setIsManualProcessing(false);
             
             // 할당량 오류 감지 시 자동 다운로드
             const isQuotaError = error.message && (
@@ -1496,7 +1896,7 @@ const App: React.FC = () => {
      * 응용데이터 계산 함수 - UI appliedDataFields 순서를 엄격히 준수
      * 15년차 시니어 개발자 스타일: 의존성과 순서를 보장하는 안정적인 계산
      */
-    const calculateAndAddAppliedData = (snapshot: Snapshot, publishedAt?: string, shortsCountData?: { shortsCount: number; totalShortsViews: number }): Snapshot => {
+    const calculateAndAddAppliedData = (snapshot: Snapshot, publishedAt?: string, shortsCountData?: { shortsCount: number; totalShortsViews: number }): Snapshot | undefined => {
         console.log('🔍 [시니어 로직] 응용데이터 계산 시작 - UI 순서 엄격 준수');
         console.log('📊 선택된 필드:', Array.from(appliedFields));
         console.log('📈 총 필드 수:', appliedFields.size);
@@ -1510,6 +1910,12 @@ const App: React.FC = () => {
         const videoCount = snapshot.videoCount ? parseInt(snapshot.videoCount, 10) : undefined;
         
         console.log('📈 파싱된 기본 데이터:', { subscriberCount, viewCount, videoCount });
+
+        // 크롤링 실패한 채널 감지 (viewCount와 videoCount가 모두 0)
+        if (viewCount === 0 && videoCount === 0) {
+            console.log('❌ 크롤링 실패한 채널 감지 - 데이터가 없어 처리를 스킵합니다');
+            return undefined; // 계산 실패로 처리
+        }
         
         // 의존성 변수들 (순서대로 계산됨)
         let channelAgeDays: number | undefined;
@@ -1668,8 +2074,18 @@ const App: React.FC = () => {
                 const urlParts = currentChannel.profile_url.split('/');
                 const channelId = urlParts[urlParts.length - 1];
                 
-                // 기존 채널 데이터 수집 로직 사용
-                const channelData = await fetchSelectedChannelData(channelId, youtubeApiKey, selectedFields);
+                // 기존 채널 데이터 수집 로직 사용 (히스토리 데이터 필드 강제 추가)
+                const allFieldsForDanbi = new Set([...selectedFields, ...appliedFields]);
+
+                // 강제로 히스토리 데이터 필드들 추가
+                allFieldsForDanbi.add('recentThumbnails');
+                allFieldsForDanbi.add('dailyViews');
+                allFieldsForDanbi.add('weeklyViews');
+                allFieldsForDanbi.add('subscriberCount');
+                allFieldsForDanbi.add('uploadsPlaylistId');
+                allFieldsForDanbi.add('viewCount');
+
+                const channelData = await fetchSelectedChannelData(channelId, youtubeApiKey, allFieldsForDanbi);
                 
                 if (channelData) {
                     // Google Drive에 저장
@@ -1705,7 +2121,7 @@ const App: React.FC = () => {
     }, [isDanbiBatchRunning, danbiCsvData, danbiProgress, youtubeApiKey, selectedFields, appliedFields, selectedFolder, addLog]);
 
     const handleStartProcess = useCallback(async () => {
-        if (isProcessing) return;
+        if (isProcessing || step4Complete || isManualProcessing) return; // 수동 처리 중이면 실행 안함
         
         addLog(LogStatus.INFO, `=== 데이터 수집 프로세스 시작 === (대상: ${targetChannelIds.length}개 채널)`);
         setIsProcessing(true);
@@ -1718,16 +2134,27 @@ const App: React.FC = () => {
             try {
                 // 1. Fetch channel data
                 const allFields = new Set([...selectedFields, ...appliedFields]);
+
+                // 강제로 히스토리 데이터 필드들 추가 (수동 입력, 단비 처리에서도 모든 히스토리 데이터 포함)
+                allFields.add('recentThumbnails');
+                allFields.add('dailyViews');
+                allFields.add('weeklyViews');
+                allFields.add('subscriberCount'); // 구독자 히스토리를 위해 필요
+
                 // Ensure dependent fields are fetched
                 if (appliedFields.has('longformCount')) {
                    allFields.add('videoCount');
                 }
-                if (allFields.has('shortsCount') || allFields.has('longformCount') || allFields.has('totalShortsDuration') || allFields.has('estimatedShortsViews') || allFields.has('estimatedLongformViews')) {
+                if (allFields.has('shortsCount') || allFields.has('longformCount') || allFields.has('totalShortsDuration') || allFields.has('estimatedShortsViews') || allFields.has('estimatedLongformViews') || allFields.has('recentThumbnails')) {
                     allFields.add('uploadsPlaylistId');
                 }
                 if (Array.from(appliedFields).some((f: string) => f.includes('Gained') || f.includes('uploadsPer') || f.includes('Age'))) {
                     allFields.add('publishedAt');
                 }
+
+                // 히스토리 데이터를 위한 의존성 필드들 자동 추가
+                allFields.add('uploadsPlaylistId'); // 썸네일 히스토리를 위해 필요
+                allFields.add('viewCount'); // 일일/주간 조회수 히스토리를 위해 필요
 
                 const { staticData, snapshotData } = await fetchSelectedChannelData(channelId, youtubeApiKey, allFields);
                 addLog(LogStatus.SUCCESS, `기본 데이터 수집 완료: ${staticData.title || channelId}`);
@@ -1747,24 +2174,95 @@ const App: React.FC = () => {
                     }
                 }
 
+                // 2.5. Fetch recent thumbnails if needed
+                let recentThumbnailsHistory: ThumbnailHistoryEntry[] | undefined;
+                if (allFields.has('recentThumbnails') && uploadsPlaylistId) {
+                    addLog(LogStatus.PENDING, '최근 7일 썸네일 수집 중... 최신 영상들의 썸네일을 가져오는 중입니다.');
+                    try {
+                        const recentThumbnails = await fetchRecentThumbnails(uploadsPlaylistId, youtubeApiKey);
+                        recentThumbnailsHistory = recentThumbnails;
+                        addLog(LogStatus.SUCCESS, `썸네일 수집 완료: 최근 7일간 ${recentThumbnails.length}개 썸네일 수집.`);
+                    } catch (e: any) {
+                        addLog(LogStatus.ERROR, `썸네일 수집 실패: ${e.message}`);
+                    }
+                }
+
+                // 2.6. Calculate daily views history if needed
+                let dailyViewsHistory: DailyViewsHistoryEntry[] | undefined;
+                if (allFields.has('dailyViews')) {
+                    addLog(LogStatus.PENDING, '일일 조회수 계산 중... 과거 데이터와 비교하여 일일 증가량을 계산합니다.');
+                    try {
+                        const currentViewCount = snapshotData.viewCount || '0';
+                        dailyViewsHistory = await calculateDailyViewsHistory(channelId, currentViewCount);
+                        addLog(LogStatus.SUCCESS, `일일 조회수 계산 완료: 최근 7일간 데이터 생성.`);
+                    } catch (e: any) {
+                        addLog(LogStatus.ERROR, `일일 조회수 계산 실패: ${e.message}`);
+                    }
+                }
+
+                // 2.7. Calculate weekly views history if needed (only if 7 days passed)
+                let weeklyViewsHistory: WeeklyViewsHistoryEntry[] | undefined;
+                if (allFields.has('weeklyViews')) {
+                    addLog(LogStatus.PENDING, '주간 조회수 계산 중... 7일 간격 체크 후 주간 데이터를 생성합니다.');
+                    try {
+                        const currentViewCount = snapshotData.viewCount || '0';
+                        weeklyViewsHistory = await calculateWeeklyViewsHistory(channelId, currentViewCount);
+                        addLog(LogStatus.SUCCESS, `주간 조회수 계산 완료: 최근 4주간 데이터 생성.`);
+                    } catch (e: any) {
+                        addLog(LogStatus.ERROR, `주간 조회수 계산 실패: ${e.message}`);
+                    }
+                }
+
+                // 2.8. Calculate subscriber history if needed (monthly, max 5 entries)
+                let subscriberHistory: SubscriberHistoryEntry[] | undefined;
+                if (allFields.has('subscriberCount')) {
+                    addLog(LogStatus.PENDING, '구독자 히스토리 계산 중... 월별 구독자 수를 기록합니다.');
+                    try {
+                        const currentSubscriberCount = snapshotData.subscriberCount || '0';
+                        subscriberHistory = await calculateSubscriberHistory(channelId, currentSubscriberCount);
+                        addLog(LogStatus.SUCCESS, `구독자 히스토리 계산 완료: 최근 5개월 데이터 생성.`);
+                    } catch (e: any) {
+                        addLog(LogStatus.ERROR, `구독자 히스토리 계산 실패: ${e.message}`);
+                    }
+                }
+
                 // 3. Calculate applied data
                 const newSnapshotWithAppliedData = calculateAndAddAppliedData(snapshotData, staticData.publishedAt, shortsCountData);
 
-                // 3.5. 17개 축약 지표 검증 (gsvr 제거)
-                const requiredFields = ['gavg', 'gsub', 'gvps', 'gage', 'gupw', 'gspd', 'gvpd', 'gspm', 'gspy', 'gvir', 'csct', 'clct', 'csdr', 'vesv', 'vsvp', 'velv', 'vlvp'];
-                const missingFields = requiredFields.filter(field => newSnapshotWithAppliedData[field as keyof typeof newSnapshotWithAppliedData] === undefined);
-                
-                console.log(`// 17개 매칭 -> ${missingFields.length === 0 ? '성공' : '실패'} -> ${missingFields.length === 0 ? '저장합니다' : '종료합니다'}`);
-                
-                if (missingFields.length > 0) {
-                    console.log(`// 누락된 필드들: ${missingFields.join(', ')}`);
-                    addLog(LogStatus.ERROR, `❌ 17개 지표 검증 실패 - 누락된 필드: ${missingFields.join(', ')}`);
-                    addLog(LogStatus.WARNING, `⚠️ 필수 지표 누락으로 인해 저장을 중단합니다.`);
+                // 3.5. 14개 기본 데이터 + 17개 응용 데이터 검증
+                const staticFields = ['title', 'customUrl', 'country', 'thumbnailDefault', 'uploadsPlaylistId'];
+                const snapshotFields = ['viewCount', 'videoCount', 'subscriberCount'];
+                const requiredAppliedFields = ['gavg', 'gsub', 'gvps', 'gage', 'gupw', 'gspd', 'gvpd', 'gspm', 'gspy', 'gvir', 'csct', 'clct', 'csdr', 'vesv', 'vsvp', 'velv', 'vlvp'];
+
+                const missingStaticFields = staticFields.filter(field => {
+                    if (field === 'country') {
+                        // country가 없으면 "null"로 설정하고 누락으로 처리하지 않음
+                        if (staticData[field as keyof typeof staticData] === undefined) {
+                            staticData.country = "null";
+                            return false;
+                        }
+                    }
+                    return staticData[field as keyof typeof staticData] === undefined;
+                });
+                const missingSnapshotFields = snapshotFields.filter(field => newSnapshotWithAppliedData[field as keyof typeof newSnapshotWithAppliedData] === undefined);
+                const missingAppliedFields = requiredAppliedFields.filter(field => newSnapshotWithAppliedData[field as keyof typeof newSnapshotWithAppliedData] === undefined);
+
+                const totalBasicMissing = missingStaticFields.length + missingSnapshotFields.length;
+                const totalMissing = totalBasicMissing + missingAppliedFields.length;
+
+                console.log(`// 31개 필드 검증 (기본 14개 + 응용 17개) -> ${totalMissing === 0 ? '성공' : '실패'} -> ${totalMissing === 0 ? '저장합니다' : '종료합니다'}`);
+
+                if (totalMissing > 0) {
+                    console.log(`// 누락된 static 필드: ${missingStaticFields.join(', ')}`);
+                    console.log(`// 누락된 snapshot 필드: ${missingSnapshotFields.join(', ')}`);
+                    console.log(`// 누락된 응용 필드: ${missingAppliedFields.join(', ')}`);
+                    addLog(LogStatus.ERROR, `❌ 31개 필드 검증 실패 - static 누락: ${missingStaticFields.length}개, snapshot 누락: ${missingSnapshotFields.length}개, 응용 누락: ${missingAppliedFields.length}개`);
+                    addLog(LogStatus.WARNING, `⚠️ 필수 필드 누락으로 인해 저장을 중단합니다.`);
                     return;
                 }
-                
-                console.log('// 17개 매칭 -> 성공 -> 저장합니다 -> 다음으로');
-                addLog(LogStatus.SUCCESS, `✓ 17개 지표 검증 완료 - ${staticData.title || channelId}`);
+
+                console.log('// 31개 필드 검증 완료 -> 저장합니다 -> 다음으로');
+                addLog(LogStatus.SUCCESS, `✓ 31개 필드 검증 완료 (기본 14개 + 응용 17개) - ${staticData.title || channelId}`);
 
                 // 3.6. 데이터 일관성 보정 로직 (ε = 1%)
                 const ε = 1; // 최소 비중 1%
@@ -1824,7 +2322,27 @@ const App: React.FC = () => {
                         lastUpdated: now,
                         totalCollections: channelData.snapshots.length
                     };
-                    
+
+                    // Update recent thumbnails history if collected
+                    if (recentThumbnailsHistory) {
+                        channelData.recentThumbnailsHistory = recentThumbnailsHistory;
+                    }
+
+                    // Update daily views history if collected
+                    if (dailyViewsHistory) {
+                        channelData.dailyViewsHistory = dailyViewsHistory;
+                    }
+
+                    // Update weekly views history if collected
+                    if (weeklyViewsHistory) {
+                        channelData.weeklyViewsHistory = weeklyViewsHistory;
+                    }
+
+                    // Update subscriber history if collected
+                    if (subscriberHistory) {
+                        channelData.subscriberHistory = subscriberHistory;
+                    }
+
                     // 파일 저장은 updateOrCreateChannelFile에서 처리
                 } else {
                     addLog(LogStatus.INFO, `새 파일 '${fileName}'을(를) 생성합니다.`);
@@ -1836,10 +2354,17 @@ const App: React.FC = () => {
                             firstCollected: now,
                             lastUpdated: now,
                             totalCollections: 1
-                        }
+                        },
+                        ...(recentThumbnailsHistory && { recentThumbnailsHistory }),
+                        ...(dailyViewsHistory && { dailyViewsHistory }),
+                        ...(weeklyViewsHistory && { weeklyViewsHistory }),
+                        ...(subscriberHistory && { subscriberHistory })
                     };
                     // 파일 저장은 updateOrCreateChannelFile에서 처리
                 }
+
+                // 5. Save to Google Drive
+                await updateOrCreateChannelFile(channelData, folderId);
                 addLog(LogStatus.SUCCESS, `[${currentChannelIndex.current + 1}/${targetChannelIds.length}] ${channelId} 처리 완료. Drive에 저장되었습니다.`);
 
             } catch (error: any) {
@@ -1872,10 +2397,11 @@ const App: React.FC = () => {
     }, [isProcessing, isPaused, targetChannelIds, addLog, youtubeApiKey, selectedFields, appliedFields]);
 
     useEffect(() => {
-        if (isProcessingStarted) {
+        // 수동 처리 모드에서는 handleStartProcess 실행하지 않음
+        if (isProcessingStarted && !isProcessing && !isManualProcessing && !step4Complete) {
             handleStartProcess();
         }
-    }, [isProcessingStarted, handleStartProcess]);
+    }, [isProcessingStarted, handleStartProcess, isProcessing, isManualProcessing, step4Complete]);
 
 
     const handlePauseProcess = () => {
@@ -1972,6 +2498,24 @@ const App: React.FC = () => {
                                         </div>
                                     )}
                                 </div>
+                            </div>
+
+                            {/* 로그인 버튼 섹션 */}
+                            <div className="bg-slate-700/30 border border-slate-600 rounded-lg p-4">
+                                <h4 className="text-lg font-medium text-white mb-3">2. Google 로그인</h4>
+                                <button
+                                    onClick={handleSignInClick}
+                                    disabled={!gapiScriptLoaded}
+                                    className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-bold px-4 rounded-lg transition-colors text-lg h-12 flex items-center justify-center gap-2"
+                                >
+                                    <svg className="w-5 h-5" viewBox="0 0 24 24">
+                                        <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                                        <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                                        <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+                                        <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+                                    </svg>
+                                    {gapiScriptLoaded ? 'Google 로그인' : '로딩 중...'}
+                                </button>
                             </div>
 
                         </div>
@@ -2402,13 +2946,14 @@ const App: React.FC = () => {
                                         onClick={() => {
                                             const preset1Fields = new Set([
                                                 'title', 'publishedAt', 'country', 'customUrl', 'channelUrl', 'thumbnailDefault',
-                                                'subscriberCount', 'videoCount', 'viewCount', 'topicCategories', 'uploadsPlaylistId'
+                                                'subscriberCount', 'videoCount', 'viewCount', 'topicCategories', 'uploadsPlaylistId',
+                                                'recentThumbnails', 'dailyViews', 'weeklyViews'
                                             ]);
                                             setSelectedFields(preset1Fields);
                                         }}
                                         className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-md transition-colors font-medium"
                                     >
-                                        옵션값 1 (11개 필드)
+                                        옵션값 1 (14개 필드)
                                     </button>
                                     <button
                                         onClick={() => setSelectedFields(new Set())}
