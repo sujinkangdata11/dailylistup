@@ -1,15 +1,16 @@
-name = "vidhunt-api"
+name = "listup"
 main = "worker.js"
 compatibility_date = "2024-03-01"
 
 [[kv_namespaces]]
 binding = "CHANNEL_DATA"
-id = "f897497753664274b9556fbab3d6dbf1"
+id = "b6cba85d233f45e294e44b0f49b70eb7"
+preview_id = "b6cba85d233f45e294e44b0f49b70eb7"
 
 # Environment variables (use wrangler secret to set these securely)
 [vars]
-GOOGLE_DRIVE_FOLDER_ID = "1MsoASuSXq1HkW-tbdh0PjqmeaSxE8DL5"
-GOOGLE_CLIENT_ID = "159046785658-07hf5ani7blsafsav0vrl19db7pkamdp.apps.googleusercontent.com"
+GOOGLE_DRIVE_FOLDER_ID = "1GNWbwAf5F0UoU3_3ZX-xGspKNy4lA90N"
+GOOGLE_CLIENT_ID = "196530803280-23q05vfrujb87dcuirfdbdkt9h78srjc.apps.googleusercontent.com"
 
 [env.production]
-name = "vidhunt-api"
+name = "listup"

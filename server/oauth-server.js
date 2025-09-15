@@ -3,11 +3,11 @@ const express = require('express');
 const { spawn } = require('child_process');
 
 const app = express();
-const PORT = 8080;
+const PORT = 8081;
 
 // Google OAuth 설정
-const CLIENT_ID = '159046785658-07hf5ani7blsafsav0vrl19db7pkamdp.apps.googleusercontent.com';
-const REDIRECT_URI = 'http://localhost:8080/auth/callback';
+const CLIENT_ID = '196530803280-23q05vfrujb87dcuirfdbdkt9h78srjc.apps.googleusercontent.com';
+const REDIRECT_URI = 'http://localhost:8081/auth/callback';
 const SCOPES = 'https://www.googleapis.com/auth/drive';
 
 let accessToken = null;
@@ -205,16 +205,38 @@ let totalChannels = 0;
 // 동기화 실행
 function runSync() {
   syncStatus = '📊 Google Drive 데이터 읽는 중...';
-  
-  const syncProcess = spawn('node', ['sync-to-kv.js', folderId, accessToken], {
-    cwd: __dirname
+
+  // 디버그용 로그 추가
+  console.log('🔍 DEBUG runSync: Starting sync process');
+  console.log('🔍 DEBUG runSync: Folder ID:', folderId);
+  console.log('🔍 DEBUG runSync: Access Token:', accessToken ? accessToken.substring(0, 20) + '...' : 'null');
+  console.log('🔍 DEBUG runSync: Current directory:', __dirname);
+
+  const syncProcess = spawn('node', ['sync-to-kv.js', folderId], {
+    cwd: __dirname,
+    env: {
+      ...process.env,
+      GOOGLE_ACCESS_TOKEN: accessToken // 환경 변수로 토큰 전달
+    },
+    stdio: ['ignore', 'pipe', 'pipe'] // stdin 무시, stdout/stderr 파이프
+  });
+
+  // 프로세스 시작 이벤트
+  syncProcess.on('spawn', () => {
+    console.log('🔍 DEBUG: sync-to-kv.js process spawned successfully');
+  });
+
+  // 프로세스 시작 오류 이벤트
+  syncProcess.on('error', (error) => {
+    console.error('🔍 DEBUG: Failed to start sync process:', error);
+    syncStatus = `❌ 프로세스 시작 오류: ${error.message}`;
   });
 
   syncProcess.stdout.on('data', (data) => {
     const output = data.toString().trim();
     syncStatus = output;
-    console.log('Sync:', syncStatus);
-    
+    console.log('🔍 DEBUG Sync stdout:', output);
+
     // 채널 개수 추출
     const channelMatch = output.match(/총 (\d+)개 채널 데이터 처리 완료/);
     if (channelMatch) {
@@ -223,19 +245,22 @@ function runSync() {
   });
 
   syncProcess.stderr.on('data', (data) => {
-    syncStatus = `❌ 오류: ${data.toString().trim()}`;
-    console.error('Sync error:', data.toString());
+    const error = data.toString().trim();
+    syncStatus = `❌ 오류: ${error}`;
+    console.error('🔍 DEBUG Sync stderr:', error);
   });
 
   syncProcess.on('close', (code) => {
+    console.log(`🔍 DEBUG: sync-to-kv.js process closed with code: ${code}`);
     if (code === 0) {
       syncStatus = '✅ Google Drive 데이터 수집 완료! KV에 업로드 중...';
       
       // KV 업로드 실행
-      const kvProcess = spawn('wrangler', [
-        'kv', 'key', 'put', 'channel-data',
+      const kvProcess = spawn('npx', [
+        'wrangler', 'kv', 'key', 'put', 'channel-data',
         '--binding', 'CHANNEL_DATA',
         '--path', 'kv-data.json',
+        '--preview', 'false',
         '--remote'
       ], {
         cwd: __dirname
@@ -255,7 +280,7 @@ function runSync() {
 
       kvProcess.on('close', (kvCode) => {
         if (kvCode === 0) {
-          syncStatus = `🎉 동기화 완료!<br>📊 <a href="https://vidhunt-api.evvi-aa-aa.workers.dev/api/channels?limit=${totalChannels}" target="_blank">API에서 데이터 확인하기</a><br>✅ 총 ${totalChannels.toLocaleString()}개 채널 데이터가 전 세계 엣지에서 빠르게 제공됩니다!`;
+          syncStatus = `🎉 동기화 완료!<br>📊 <a href="https://listup.anime-toon-7923.workers.dev/api/channels?limit=${totalChannels}" target="_blank">API에서 데이터 확인하기</a><br>✅ 총 ${totalChannels.toLocaleString()}개 채널 데이터가 전 세계 엣지에서 빠르게 제공됩니다!`;
           console.log('✅ KV 업로드 성공!');
         } else {
           syncStatus = `❌ KV 업로드 실패 (코드: ${kvCode})`;

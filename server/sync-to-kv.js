@@ -7,26 +7,37 @@ const DRIVE_API_BASE = 'https://www.googleapis.com/drive/v3';
 async function getDriveFiles(folderId, accessToken) {
   let allFiles = [];
   let nextPageToken = null;
-  
+
+  console.log('🔍 DEBUG getDriveFiles: Starting file listing');
+  console.log('🔍 DEBUG getDriveFiles: Folder ID:', folderId);
+  console.log('🔍 DEBUG getDriveFiles: Token first 30 chars:', accessToken ? accessToken.substring(0, 30) + '...' : 'null');
+
   do {
     const params = new URLSearchParams({
       q: `parents='${folderId}' and trashed=false`,
       fields: 'files(id,name),nextPageToken',
       pageSize: '1000' // 최대 1000개씩
     });
-    
+
     if (nextPageToken) {
       params.append('pageToken', nextPageToken);
     }
-    
-    const response = await fetch(`${DRIVE_API_BASE}/files?${params}`, {
+
+    const url = `${DRIVE_API_BASE}/files?${params}`;
+    console.log('🔍 DEBUG getDriveFiles: Request URL:', url);
+
+    const response = await fetch(url, {
       headers: {
         'Authorization': `Bearer ${accessToken}`,
         'Content-Type': 'application/json'
       }
     });
-    
+
+    console.log('🔍 DEBUG getDriveFiles: Response status:', response.status);
+
     if (!response.ok) {
+      const errorText = await response.text();
+      console.log('🔍 DEBUG getDriveFiles: Error response:', errorText);
       throw new Error(`Drive API error: ${response.status}`);
     }
     
@@ -76,15 +87,20 @@ async function getDriveFileContent(fileId, accessToken, maxRetries = 2) {
 }
 
 async function syncDataToKV() {
-  const [folderId, accessToken] = process.argv.slice(2);
-  
+  const [folderId] = process.argv.slice(2);
+  const accessToken = process.env.GOOGLE_ACCESS_TOKEN;
+
   if (!folderId || !accessToken) {
-    console.log('사용법: node sync-to-kv.js YOUR_FOLDER_ID YOUR_ACCESS_TOKEN');
+    console.log('사용법: node sync-to-kv.js YOUR_FOLDER_ID (access token via GOOGLE_ACCESS_TOKEN env var)');
+    console.log('Missing:', !folderId ? 'folderId' : '', !accessToken ? 'accessToken' : '');
     process.exit(1);
   }
 
   try {
     console.log('🔍 Google Drive에서 데이터 수집 시작...');
+    console.log('🔍 DEBUG sync-to-kv: Folder ID:', folderId);
+    console.log('🔍 DEBUG sync-to-kv: Access Token:', accessToken ? accessToken.substring(0, 30) + '...' : 'null');
+    console.log('🔍 DEBUG sync-to-kv: Token length:', accessToken ? accessToken.length : 0);
     
     // 입력받은 폴더가 이미 channels 폴더이므로 직접 JSON 파일들 조회
     const channelFiles = await getDriveFiles(folderId, accessToken);
