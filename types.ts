@@ -47,6 +47,7 @@ export interface ThumbnailHistoryEntry {
   title: string; // 영상 제목
   viewCount?: string; // 영상 조회수
   videoUrl?: string; // 영상 접속 URL
+  duration?: string; // 영상 길이 (예: "1:23", "15:42")
 }
 
 export interface DailyViewsHistoryEntry {

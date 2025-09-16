@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 import { ChannelData, DriveFile, LogEntry, LogStatus, Snapshot, ThumbnailHistoryEntry, DailyViewsHistoryEntry, WeeklyViewsHistoryEntry, SubscriberHistoryEntry } from './types';
-import { fetchSelectedChannelData, findChannelsImproved, fetchShortsCount, fetchChannelIdByHandle, fetchRecentThumbnails } from './services/youtubeService';
+import { fetchSelectedChannelData, findChannelsImproved, fetchShortsCount, fetchRecentThumbnails, fetchSelectedChannelDataByHandle } from './services/youtubeService';
 import { findFileByName, getFileContent, createJsonFile, updateJsonFile, listFolders, updateOrCreateChannelFile, getOrCreateChannelIndex, getExistingChannelIds } from './services/driveService';
 import { Step } from './components/Step';
 import { LogItem } from './components/LogItem';
@@ -287,6 +287,8 @@ const App: React.FC = () => {
     const [targetChannelIds, setTargetChannelIds] = useState<string[]>([]);
     const [manualChannelHandle, setManualChannelHandle] = useState('');
     const [isAddingChannel, setIsAddingChannel] = useState(false);
+    const [isUploadingTextFile, setIsUploadingTextFile] = useState(false);
+    const [uploadCompleteMessage, setUploadCompleteMessage] = useState<string>('');
     const [searchKeyword, setSearchKeyword] = useState('popular');
 
     // 2번/3번 블럭 토글 상태 (기본적으로 2번 블럭이 활성화)
@@ -918,20 +920,25 @@ const App: React.FC = () => {
     };
     
     const handleAddChannelByHandle = async () => {
+        console.log('🔍 DEBUG: handleAddChannelByHandle 시작');
         const trimmedInput = manualChannelHandle.trim();
+        console.log('🔍 DEBUG: trimmedInput:', trimmedInput);
         if (!trimmedInput) return;
 
         if (!youtubeApiKey) {
+            console.log('🔍 DEBUG: YouTube API 키 없음');
             addLog(LogStatus.ERROR, 'YouTube API 키를 설정해야 채널을 추가할 수 있습니다.');
             return;
         }
+        console.log('🔍 DEBUG: YouTube API 키 있음:', youtubeApiKey.substring(0, 10) + '...');
 
         setIsAddingChannel(true);
         
         try {
             // 콤마로 구분된 여러 핸들 처리
             const handles = trimmedInput.split(',').map(handle => handle.trim()).filter(handle => handle.length > 0);
-            
+            console.log('🔍 DEBUG: 분리된 handles 배열:', handles);
+
             if (handles.length === 1) {
                 addLog(LogStatus.PENDING, `'${handles[0]}' 핸들을 채널 ID로 변환 중...`);
             } else {
@@ -943,20 +950,21 @@ const App: React.FC = () => {
             
             for (const handle of handles) {
                 try {
-                    const channelId = await fetchChannelIdByHandle(handle, youtubeApiKey);
-                    if (!targetChannelIds.includes(channelId)) {
+                    console.log('🔍 DEBUG: 핸들 처리 중:', handle);
+
+                    if (!targetChannelIds.includes(handle)) {
                         setTargetChannelIds(prev => {
-                            const newIds = [channelId, ...prev];
+                            const newIds = [handle, ...prev];
                             // 채널이 추가되면 자동으로 3단계 완료 처리
                             if (!step3Complete && newIds.length > 0) {
                                 setStep3Complete(true);
                             }
                             return newIds;
                         });
-                        addLog(LogStatus.SUCCESS, `✅ 채널 추가 성공: ${handle} → ${channelId}`);
+                        addLog(LogStatus.SUCCESS, `✅ 채널 추가 성공: ${handle}`);
                         successCount++;
                     } else {
-                        addLog(LogStatus.WARNING, `⚠️ 채널 '${handle}' (${channelId})는 이미 목록에 존재합니다.`);
+                        addLog(LogStatus.WARNING, `⚠️ 채널 '${handle}'는 이미 목록에 존재합니다.`);
                     }
                 } catch (error: any) {
                     addLog(LogStatus.ERROR, `❌ 채널 '${handle}' 추가 실패: ${error.message}`);
@@ -967,9 +975,15 @@ const App: React.FC = () => {
             // 최종 결과 요약
             if (handles.length > 1) {
                 if (errorCount === 0) {
-                    addLog(LogStatus.SUCCESS, `🎉 모든 채널 처리 완료: ${successCount}개 성공`);
+                    const message = `🎉 수동 입력 완료: ${successCount}개 채널 성공적으로 추가됨!`;
+                    addLog(LogStatus.SUCCESS, message);
+                    setUploadCompleteMessage(message);
+                    setTimeout(() => setUploadCompleteMessage(''), 5000);
                 } else {
-                    addLog(LogStatus.WARNING, `⚡ 채널 처리 완료: ${successCount}개 성공, ${errorCount}개 실패`);
+                    const message = `⚡ 수동 입력 완료: ${successCount}개 성공, ${errorCount}개 실패`;
+                    addLog(LogStatus.WARNING, message);
+                    setUploadCompleteMessage(message);
+                    setTimeout(() => setUploadCompleteMessage(''), 5000);
                 }
             }
         } catch (error: any) {
@@ -979,7 +993,117 @@ const App: React.FC = () => {
             setIsAddingChannel(false);
         }
     };
-    
+
+    const handleTextFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+        console.log('🔍 DEBUG: handleTextFileUpload 시작');
+        const file = event.target.files?.[0];
+        console.log('🔍 DEBUG: 선택된 파일:', file?.name);
+        if (!file) return;
+
+        if (!file.name.endsWith('.txt') && !file.name.endsWith('.csv')) {
+            console.log('🔍 DEBUG: 잘못된 파일 확장자:', file.name);
+            addLog(LogStatus.ERROR, '텍스트 파일(.txt) 또는 CSV 파일(.csv)만 업로드할 수 있습니다.');
+            return;
+        }
+
+        if (!youtubeApiKey) {
+            addLog(LogStatus.ERROR, 'YouTube API 키를 설정해야 채널을 추가할 수 있습니다.');
+            return;
+        }
+
+        setIsUploadingTextFile(true);
+
+        try {
+            const text = await file.text();
+            console.log('🔍 DEBUG: 파일 내용 읽기 완료, 길이:', text.length);
+            const lines = text.split('\n').map(line => line.trim()).filter(line => line);
+            console.log('🔍 DEBUG: 전체 라인 수:', lines.length);
+
+            let channelIds: string[] = [];
+
+            if (file.name.endsWith('.csv')) {
+                // CSV 파일 처리: 2번째 컬럼에서 채널 ID 추출
+                channelIds = lines.slice(1) // 첫 번째 줄(헤더) 제외
+                    .map(line => {
+                        const columns = line.split(',');
+                        return columns[1]?.trim(); // 2번째 컬럼 (0-based index 1)
+                    })
+                    .filter(id => id && (id.startsWith('UC') || id.startsWith('HC'))) // 유효한 채널 ID만
+                    .map(id => id.split(/\s/)[0]); // 공백 있으면 첫 번째 부분만 사용
+            } else {
+                // 텍스트 파일 처리: 채널 ID만 추출 (UC로 시작)
+                channelIds = lines
+                    .filter(line => line.startsWith('UC') || line.startsWith('HC'))
+                    .map(line => line.split(/\s/)[0]); // 공백 있으면 첫 번째 부분만 사용
+            }
+            console.log('🔍 DEBUG: 추출된 채널 ID 수:', channelIds.length);
+            console.log('🔍 DEBUG: 처음 5개 채널 ID:', channelIds.slice(0, 5));
+
+            if (channelIds.length === 0) {
+                const fileType = file.name.endsWith('.csv') ? 'CSV 파일의 2번째 컬럼' : '텍스트 파일';
+                addLog(LogStatus.WARNING, `${fileType}에서 채널 ID(UC 또는 HC로 시작)를 찾을 수 없습니다.`);
+                return;
+            }
+
+            addLog(LogStatus.INFO, `📄 파일에서 ${channelIds.length}개의 채널 ID를 발견했습니다. 순서대로 처리를 시작합니다...`);
+
+            let successCount = 0;
+            let errorCount = 0;
+            const duplicateCount = 0;
+
+            for (let i = 0; i < channelIds.length; i++) {
+                const channelId = channelIds[i];
+
+                addLog(LogStatus.PENDING, `[${i + 1}/${channelIds.length}] ${channelId} 처리 중...`);
+                console.log(`🔍 DEBUG: [${i + 1}/${channelIds.length}] 채널 ID 처리 중:`, channelId);
+
+                try {
+                    if (!targetChannelIds.includes(channelId)) {
+                        setTargetChannelIds(prev => {
+                            const newIds = [channelId, ...prev];
+                            // 채널이 추가되면 자동으로 3단계 완료 처리
+                            if (!step3Complete && newIds.length > 0) {
+                                setStep3Complete(true);
+                            }
+                            return newIds;
+                        });
+                        addLog(LogStatus.SUCCESS, `✅ [${i + 1}/${channelIds.length}] ${channelId} 성공`);
+                        successCount++;
+                    } else {
+                        addLog(LogStatus.WARNING, `⚠️ [${i + 1}/${channelIds.length}] ${channelId}는 이미 존재함`);
+                    }
+
+                    // 채널 ID는 즉시 추가되므로 딜레이 불필요
+                    // (실제 API 호출은 데이터 수집 단계에서 발생)
+
+                } catch (error: any) {
+                    addLog(LogStatus.ERROR, `❌ [${i + 1}/${channelIds.length}] ${channelId} 실패: ${error.message}`);
+                    errorCount++;
+                }
+            }
+
+            // 최종 결과 요약
+            if (errorCount === 0) {
+                const message = `🎉 텍스트 파일 업로드 완료: ${successCount}개 채널 성공적으로 추가됨!`;
+                addLog(LogStatus.SUCCESS, message);
+                setUploadCompleteMessage(message);
+                setTimeout(() => setUploadCompleteMessage(''), 5000);
+            } else {
+                const message = `⚡ 텍스트 파일 업로드 완료: ${successCount}개 성공, ${errorCount}개 실패`;
+                addLog(LogStatus.WARNING, message);
+                setUploadCompleteMessage(message);
+                setTimeout(() => setUploadCompleteMessage(''), 5000);
+            }
+
+        } catch (error: any) {
+            addLog(LogStatus.ERROR, `텍스트 파일 처리 중 오류 발생: ${error.message}`);
+        } finally {
+            setIsUploadingTextFile(false);
+            // 파일 input 초기화
+            event.target.value = '';
+        }
+    };
+
     const handleRemoveChannel = (idToRemove: string) => {
         setTargetChannelIds(prev => {
             const newIds = prev.filter(id => id !== idToRemove);
@@ -2156,6 +2280,7 @@ const App: React.FC = () => {
                 allFields.add('uploadsPlaylistId'); // 썸네일 히스토리를 위해 필요
                 allFields.add('viewCount'); // 일일/주간 조회수 히스토리를 위해 필요
 
+                // 채널 ID로 데이터 수집 (단비 CSV와 동일한 방식)
                 const { staticData, snapshotData } = await fetchSelectedChannelData(channelId, youtubeApiKey, allFields);
                 addLog(LogStatus.SUCCESS, `기본 데이터 수집 완료: ${staticData.title || channelId}`);
 
@@ -2807,6 +2932,51 @@ const App: React.FC = () => {
                         </div>
 
                         {/* 구분선 */}
+                        <div className="flex items-center gap-4">
+                            <div className="flex-1 h-px bg-slate-600"></div>
+                            <span className="text-slate-400 text-sm">또는</span>
+                            <div className="flex-1 h-px bg-slate-600"></div>
+                        </div>
+
+                        {/* 텍스트 파일 업로드 (채널 ID 목록) */}
+                        <div className="flex flex-col gap-3">
+                            <label className="text-sm font-medium text-slate-300">📄 채널 ID 파일 업로드</label>
+                            <div className="text-xs text-slate-400">
+                                텍스트 파일(.txt) 또는 CSV 파일(.csv)에서 채널 ID를 읽어와서 순서대로 채널을 추가합니다.
+                                <br />
+                                <strong>텍스트 파일:</strong> 각 줄에 하나씩 채널 ID (예: UCxxxxxxxxxxxxx)
+                                <br />
+                                <strong>CSV 파일:</strong> 2번째 컬럼에 채널 ID (예: @핸들명,UCxxxxxxxxxxxxx)
+                            </div>
+                            <input
+                                type="file"
+                                accept=".txt,.csv"
+                                onChange={handleTextFileUpload}
+                                disabled={isUploadingTextFile}
+                                className="block w-full text-sm text-slate-300 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-green-600 file:text-white hover:file:bg-green-700 bg-slate-700 border border-slate-600 rounded-lg disabled:opacity-50"
+                            />
+                            {isUploadingTextFile && (
+                                <div className="flex items-center gap-2 text-sm text-green-400">
+                                    <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
+                                    채널 ID 처리 중...
+                                </div>
+                            )}
+                            {uploadCompleteMessage && (
+                                <div className="mt-3 p-4 bg-green-500/10 border border-green-500/30 rounded-lg">
+                                    <div className="flex items-center gap-2 text-green-400 text-base font-medium">
+                                        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                                            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                                        </svg>
+                                        {uploadCompleteMessage}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        {/* 구분선 2 */}
                         <div className="flex items-center gap-4">
                             <div className="flex-1 h-px bg-slate-600"></div>
                             <span className="text-slate-400 text-sm">또는</span>

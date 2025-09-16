@@ -268,12 +268,24 @@ export const findChannels = async (
 const parseISO8601Duration = (duration: string): number => {
     const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/);
     if (!match) return 0;
-    
+
     match.shift(); // remove full match
-    
+
     const [hours, minutes, seconds] = match.map(val => parseInt(val || '0', 10));
-    
+
     return (hours * 3600) + (minutes * 60) + seconds;
+};
+
+const formatDuration = (totalSeconds: number): string => {
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+
+    if (hours > 0) {
+        return `${hours}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    } else {
+        return `${minutes}:${seconds.toString().padStart(2, '0')}`;
+    }
 };
 
 export const fetchShortsCount = async (
@@ -340,7 +352,7 @@ export const fetchShortsCount = async (
 export const fetchRecentThumbnails = async (
   uploadsPlaylistId: string,
   apiKey: string
-): Promise<{ date: string; url: string; title: string; viewCount?: string; videoUrl?: string }[]> => {
+): Promise<{ date: string; url: string; title: string; viewCount?: string; videoUrl?: string; duration?: string }[]> => {
   let videoIds: string[] = [];
   let nextPageToken: string | undefined = undefined;
 
@@ -355,12 +367,12 @@ export const fetchRecentThumbnails = async (
 
   videoIds = playlistData.items.map((item: any) => item.contentDetails.videoId).filter(Boolean);
 
-  const recentThumbnails: { date: string; url: string; title: string; viewCount?: string; videoUrl?: string }[] = [];
+  const recentThumbnails: { date: string; url: string; title: string; viewCount?: string; videoUrl?: string; duration?: string }[] = [];
 
   // 2. Fetch video details in batches of 50 to get publish dates, thumbnails, titles, and view counts
   for (let i = 0; i < videoIds.length; i += 50) {
     const batch = videoIds.slice(i, i + 50);
-    const videosUrl = `${API_BASE_URL}/videos?part=snippet,statistics&id=${batch.join(',')}&key=${apiKey}`;
+    const videosUrl = `${API_BASE_URL}/videos?part=snippet,statistics,contentDetails&id=${batch.join(',')}&key=${apiKey}`;
     const videosResponse = await fetch(videosUrl);
     if (!videosResponse.ok) {
         const errorData = await videosResponse.json();
@@ -369,7 +381,7 @@ export const fetchRecentThumbnails = async (
     }
     const videosData = await videosResponse.json();
 
-    // 3. Collect thumbnails with dates, titles, view counts, and video URLs for all videos (최근 7개)
+    // 3. Collect thumbnails with dates, titles, view counts, video URLs, and durations for all videos (최근 7개)
     for (const video of videosData.items) {
       if (video.snippet && video.snippet.publishedAt) {
         const publishDate = new Date(video.snippet.publishedAt);
@@ -379,6 +391,15 @@ export const fetchRecentThumbnails = async (
         const viewCount = video.statistics?.viewCount || '0';
         const videoId = video.id;
         const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+
+        // Parse and format duration
+        let duration: string | undefined = undefined;
+        if (video.contentDetails && video.contentDetails.duration) {
+          const durationInSeconds = parseISO8601Duration(video.contentDetails.duration);
+          if (durationInSeconds > 0) {
+            duration = formatDuration(durationInSeconds);
+          }
+        }
 
         if (thumbnails) {
           const thumbnailUrl = thumbnails.maxres?.url ||
@@ -394,7 +415,8 @@ export const fetchRecentThumbnails = async (
               url: thumbnailUrl,
               title,
               viewCount: parseInt(viewCount).toLocaleString(),
-              videoUrl
+              videoUrl,
+              duration
             });
           }
         }
@@ -425,4 +447,139 @@ export const fetchChannelIdByHandle = async (handle: string, apiKey:string): Pro
     
     const channelId = searchData.items[0].snippet.channelId;
     return channelId;
+};
+
+export const fetchSelectedChannelDataByHandle = async (
+  handle: string,
+  apiKey: string,
+  fields: Set<string>
+): Promise<{ staticData: Partial<ChannelData>, snapshotData: Snapshot }> => {
+
+  const partMapping: { [key: string]: string } = {
+    // snippet
+    title: 'snippet',
+    description: 'snippet',
+    customUrl: 'snippet',
+    publishedAt: 'snippet',
+    thumbnailUrl: 'snippet',
+    defaultLanguage: 'snippet',
+    country: 'snippet',
+    // statistics
+    subscriberCount: 'statistics',
+    viewCount: 'statistics',
+    videoCount: 'statistics',
+    hiddenSubscriberCount: 'statistics',
+    // brandingSettings
+    keywords: 'brandingSettings',
+    bannerExternalUrl: 'brandingSettings',
+    unsubscribedTrailer: 'brandingSettings',
+    // contentDetails
+    uploadsPlaylistId: 'contentDetails',
+    // topicDetails
+    topicIds: 'topicDetails',
+    topicCategories: 'topicDetails',
+    // status
+    privacyStatus: 'status',
+    isLinked: 'status',
+    longUploadsStatus: 'status',
+    madeForKids: 'status',
+    selfDeclaredMadeForKids: 'status',
+  };
+
+  const parts = new Set<string>();
+  fields.forEach(field => {
+    if (partMapping[field]) {
+      parts.add(partMapping[field]);
+    }
+  });
+
+  if (parts.size === 0) {
+    return { staticData: {}, snapshotData: { ts: new Date().toISOString() } };
+  }
+
+  // Use forHandle parameter for direct handle lookup
+  const handleName = handle.startsWith('@') ? handle.substring(1) : handle;
+  const url = `${API_BASE_URL}/channels?part=${Array.from(parts).join(',')}&forHandle=${handleName}&key=${apiKey}`;
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(`YouTube API error: ${errorData.error.message || response.statusText}`);
+  }
+
+  const data = await response.json();
+  if (!data.items || data.items.length === 0) {
+    throw new Error(`Channel with handle '${handle}' not found.`);
+  }
+
+  const item = data.items[0];
+  const staticData: Partial<ChannelData> = {};
+  const snapshotData: Snapshot = { ts: new Date().toISOString() };
+
+  // Map snippet data
+  if (parts.has('snippet') && item.snippet) {
+    if (fields.has('title')) staticData.title = item.snippet.title;
+    if (fields.has('description')) staticData.description = item.snippet.description;
+    if (fields.has('customUrl')) staticData.customUrl = item.snippet.customUrl;
+    if (fields.has('publishedAt')) staticData.publishedAt = item.snippet.publishedAt;
+    if (fields.has('defaultLanguage')) staticData.defaultLanguage = item.snippet.defaultLanguage;
+    if (fields.has('country')) staticData.country = item.snippet.country;
+
+    // Map thumbnail/profile icon data
+    if (item.snippet.thumbnails) {
+      if (fields.has('thumbnailUrl')) {
+        staticData.thumbnailUrl = item.snippet.thumbnails.high?.url ||
+                                 item.snippet.thumbnails.medium?.url ||
+                                 item.snippet.thumbnails.default?.url;
+      }
+      if (fields.has('thumbnailDefault') && item.snippet.thumbnails.default) {
+        staticData.thumbnailDefault = item.snippet.thumbnails.default.url;
+      }
+      if (fields.has('thumbnailMedium') && item.snippet.thumbnails.medium) {
+        staticData.thumbnailMedium = item.snippet.thumbnails.medium.url;
+      }
+      if (fields.has('thumbnailHigh') && item.snippet.thumbnails.high) {
+        staticData.thumbnailHigh = item.snippet.thumbnails.high.url;
+      }
+    }
+  }
+
+  // Map statistics data
+  if (parts.has('statistics') && item.statistics) {
+    if (fields.has('subscriberCount')) snapshotData.subscriberCount = item.statistics.subscriberCount || '0';
+    if (fields.has('viewCount')) snapshotData.viewCount = item.statistics.viewCount || '0';
+    if (fields.has('videoCount')) snapshotData.videoCount = item.statistics.videoCount || '0';
+    if (fields.has('hiddenSubscriberCount')) snapshotData.hiddenSubscriberCount = item.statistics.hiddenSubscriberCount;
+  }
+
+  // Map brandingSettings data
+  if (parts.has('brandingSettings') && item.brandingSettings) {
+    if (fields.has('keywords') && item.brandingSettings.channel) staticData.keywords = item.brandingSettings.channel.keywords;
+    if (fields.has('unsubscribedTrailer') && item.brandingSettings.channel) staticData.unsubscribedTrailer = item.brandingSettings.channel.unsubscribedTrailer;
+    if (fields.has('bannerExternalUrl') && item.brandingSettings.image) {
+      staticData.bannerExternalUrl = item.brandingSettings.image.bannerExternalUrl;
+    }
+  }
+
+  // Map contentDetails data
+  if (parts.has('contentDetails') && item.contentDetails && item.contentDetails.relatedPlaylists) {
+      if (fields.has('uploadsPlaylistId')) staticData.uploadsPlaylistId = item.contentDetails.relatedPlaylists.uploads;
+  }
+
+  // Map topicDetails data
+  if (parts.has('topicDetails') && item.topicDetails) {
+      if (fields.has('topicIds')) staticData.topicIds = item.topicDetails.topicIds;
+      if (fields.has('topicCategories')) staticData.topicCategories = item.topicDetails.topicCategories;
+  }
+
+  // Map status data
+  if (parts.has('status') && item.status) {
+      if (fields.has('privacyStatus')) staticData.privacyStatus = item.status.privacyStatus;
+      if (fields.has('isLinked')) staticData.isLinked = item.status.isLinked;
+      if (fields.has('longUploadsStatus')) staticData.longUploadsStatus = item.status.longUploadsStatus;
+      if (fields.has('madeForKids')) staticData.madeForKids = item.status.madeForKids;
+      if (fields.has('selfDeclaredMadeForKids')) staticData.selfDeclaredMadeForKids = item.status.selfDeclaredMadeForKids;
+  }
+
+  return { staticData, snapshotData };
 };
