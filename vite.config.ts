@@ -5,6 +5,10 @@ export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
     return {
       base: './',
+      build: {
+        target: 'esnext',
+        minify: 'esbuild'
+      },
       server: {
         port: 9090
       },
