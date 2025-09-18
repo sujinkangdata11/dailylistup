@@ -257,6 +257,8 @@ const appliedDataFields = [
 
 
 const App: React.FC = () => {
+    console.log('📱 App component rendering...');
+
     const [googleAuth, setGoogleAuth] = useState<any>(null);
     const [user, setUser] = useState<any>(null);
 
