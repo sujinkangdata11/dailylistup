@@ -6,8 +6,11 @@
   "scripts": {
     "dev": "vite --port 9090",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "predeploy": "npm run build",
+    "deploy": "gh-pages -d dist"
   },
+  "homepage": "https://sujinkangdata11.github.io/dailylistup",
   "dependencies": {
     "jsrsasign": "^11.1.0",
     "react": "^19.1.1",
@@ -15,6 +18,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
+    "gh-pages": "^6.3.0",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
